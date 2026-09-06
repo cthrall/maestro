@@ -16,12 +16,12 @@ use crate::core::AppState;
 use crate::integration::code_hosting_handlers::{CodeHostingRung, code_hosting_status};
 use crate::integration::issue_tracking_handlers::find_integration;
 use crate::integration::pull_request::{
-    CheckStatus, CiState, PullRequestCheck, PullRequestState, PullRequestSummary,
-    PullRequestTarget, create_pull_request, fetch_ci_checks, fetch_pull_request_summary,
-    find_pull_request_by_head, list_open_pull_requests, preferred_credential_base, summarise_checks,
-    supports_branch_lookup, supports_pull_requests,
+    CheckStatus, CiRollup, ListedPullRequest, ListedPullRequestDetail, PullRequestCheck,
+    PullRequestState, PullRequestTarget, create_pull_request,
+    fetch_branch_pull_request as fetch_branch_pull_request_on_forge, fetch_row_detail,
+    finds_pull_request_by_branch, list_open_pull_requests, preferred_credential_base,
+    supports_pull_request_list, supports_pull_requests,
 };
-use crate::task::models::PullRequestCi;
 
 /// What became of a pull request, for the panel.
 ///
@@ -34,41 +34,6 @@ pub enum BranchPullRequestState {
     Open,
     Merged,
     Closed,
-}
-
-/// The pull request open on a session's branch, as the Overview card renders it.
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-#[specta(export)]
-pub struct BranchPullRequestInfo {
-    pub number: i64,
-    pub url: String,
-    pub title: String,
-    pub state: BranchPullRequestState,
-    /// `None` on a forge that will not report CI — Gitea and Forgejo always, and anywhere the
-    /// request failed. The card drops its checks block rather than showing a spinner that will
-    /// never resolve.
-    pub ci: Option<PullRequestCi>,
-    /// Names of the checks that failed, and empty unless `ci` is `Failing`. Carried so the panel
-    /// can seed a prompt that names them rather than telling the agent to go and look.
-    pub failing_checks: Vec<String>,
-    /// Every check the forge would name, so the card can show a rollup and the individual rows
-    /// rather than repeating the one-word verdict. Empty on a forge that will not enumerate, which
-    /// is what the card reads as "no checks block".
-    pub checks: Vec<PullRequestCheckInfo>,
-    /// The head commit, which the fast checks poll needs to ask about CI without re-finding the
-    /// pull request. `None` on a forge whose list endpoint does not carry it.
-    pub head_sha: Option<String>,
-    /// RFC 3339, for the "opened 12m ago" line.
-    pub created_at: Option<String>,
-    pub base_branch: Option<String>,
-    pub head_branch: Option<String>,
-    pub commits: Option<i64>,
-    pub changed_files: Option<i64>,
-    pub additions: Option<i64>,
-    pub deletions: Option<i64>,
-    /// `false` is a conflict the user has to resolve. `None` is the forge still computing the
-    /// merge commit, which the card must not paint as either answer — see `PullRequestDetails`.
-    pub mergeable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -92,13 +57,16 @@ pub enum PullRequestCheckStatus {
 pub struct OpenedPullRequest {
     pub number: i64,
     pub url: String,
+    /// Lets the caller put the new pull request straight into its cached open list instead of
+    /// waiting out a poll: every other field it needs was in the request, and this is the one the
+    /// checks query is keyed on. `None` on a forge whose create response omits it — see
+    /// [`CreatedPullRequest::head_sha`].
+    pub head_sha: Option<String>,
 }
 
-/// One open pull request, as the Worktrees view's panel and card chips read it.
+/// One open pull request, as the Worktrees view's panel reads it.
 ///
-/// Deliberately thinner than [`BranchPullRequestInfo`]: no state, because every entry here is open;
-/// no checks and no line counts, because both cost a request each and are fetched against
-/// [`head_sha`](Self::head_sha) so they survive a poll that changed nothing.
+/// No state, because every entry here is open by definition.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[specta(export)]
 pub struct ProjectPullRequest {
@@ -110,21 +78,83 @@ pub struct ProjectPullRequest {
     pub base_branch: Option<String>,
     pub created_at: Option<String>,
     pub head_sha: Option<String>,
+    /// Part of the key the frontend holds `detail` under. `head_sha` alone would miss a CI run that
+    /// started or finished without a new commit, and the row would keep its first answer forever.
+    pub updated_at: Option<String>,
+    /// `None` means *unasked*, and is the caller's signal to fetch it for this row with
+    /// [`fetch_pull_request_row_detail`]. GitHub fills it here from the same GraphQL request that
+    /// produced the row, so on GitHub that command is never called at all.
+    pub detail: Option<PullRequestRowDetail>,
 }
 
-/// What a pull request's diff amounts to: the fields a *list* endpoint does not carry.
+/// The line counts, file count and CI verdict a row shows.
 ///
-/// Every field is optional because the forges disagree about which they answer — GitLab reports no
-/// line counts on the merge request at all — and an absent one renders as a dropped metric rather
-/// than a zero.
+/// The same shape whether it arrived inside the list or from the per-row command, so the frontend
+/// has one type for "what this row knows" and no branch on where it came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[specta(export)]
+pub struct PullRequestRowDetail {
+    pub additions: Option<i64>,
+    pub deletions: Option<i64>,
+    pub changed_files: Option<i64>,
+    pub ci: PullRequestCiRollup,
+}
+
+/// A row's CI as one mark.
+///
+/// Mirrors [`CiRollup`]. A verdict rather than a list of names, because naming the checks is what
+/// made the query this replaces cost a hundred times as much — and a row draws one coloured icon.
+/// Names are still read where they are shown: the session panel and the worktree card chip both ask
+/// about a single branch and get the full list.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[specta(export)]
+#[serde(rename_all = "PascalCase")]
+pub enum PullRequestCiRollup {
+    Passing,
+    Failing,
+    Running,
+    Unknown,
+}
+
+/// One page of a project's open pull requests.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[specta(export)]
-pub struct PullRequestFacts {
+pub struct PullRequestPageInfo {
+    pub items: Vec<ProjectPullRequest>,
+    /// Pass back verbatim to ask for the next page. Opaque — a GraphQL cursor on GitHub, a row
+    /// offset elsewhere — and `None` when there is no next page.
+    pub next_cursor: Option<String>,
+    /// How many are open in total, where the forge says so cheaply. `None` on Bitbucket Server and
+    /// Azure DevOps, whose responses carry no total at all; the header then reports how many it is
+    /// showing rather than inventing a denominator.
+    pub total: Option<i64>,
+}
+
+/// The pull request on a session's branch, whole.
+///
+/// One shape because it is one question and, on GitHub, one request. Detection, state and CI were
+/// three queries at three rates until measuring showed a single-pull-request GraphQL call carrying
+/// all of it costs one point — and that splitting them is what let the card's header and its check
+/// ring describe two different moments.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[specta(export)]
+pub struct BranchPullRequestInfo {
+    pub number: i64,
+    pub url: String,
+    pub state: BranchPullRequestState,
+    pub title: Option<String>,
+    pub base_branch: Option<String>,
+    pub head_branch: Option<String>,
+    pub head_sha: Option<String>,
+    pub created_at: Option<String>,
     pub commits: Option<i64>,
     pub changed_files: Option<i64>,
     pub additions: Option<i64>,
     pub deletions: Option<i64>,
+    /// `false` is a conflict to resolve; `None` is the forge still computing the merge commit.
     pub mergeable: Option<bool>,
+    /// Empty on a forge that names no checks, and for a pull request that has already landed.
+    pub checks: Vec<PullRequestCheckInfo>,
 }
 
 /// Resolve the forge and a credential for it, or say which of the two is missing.
@@ -158,46 +188,6 @@ async fn resolve_target(
     Ok((config, integration.token, integration.instance_url))
 }
 
-fn ci_summary(state: &CiState) -> (Option<PullRequestCi>, Vec<String>) {
-    match state {
-        CiState::Passing => (Some(PullRequestCi::Passing), Vec::new()),
-        CiState::Pending => (Some(PullRequestCi::Pending), Vec::new()),
-        CiState::Failing(checks) => (Some(PullRequestCi::Failing), checks.clone()),
-        CiState::Unknown => (None, Vec::new()),
-    }
-}
-
-fn to_info(
-    found: crate::integration::pull_request::BranchPullRequest,
-    ci: Option<PullRequestCi>,
-    failing_checks: Vec<String>,
-    checks: Vec<PullRequestCheck>,
-    summary: PullRequestSummary,
-) -> BranchPullRequestInfo {
-    BranchPullRequestInfo {
-        head_sha: found.details.head_sha.clone(),
-        created_at: summary.created_at,
-        base_branch: summary.base_ref,
-        head_branch: summary.head_ref,
-        commits: summary.commits,
-        changed_files: summary.changed_files,
-        additions: summary.additions,
-        deletions: summary.deletions,
-        mergeable: summary.mergeable,
-        number: found.number,
-        url: found.url,
-        title: found.title,
-        state: match found.details.state {
-            PullRequestState::Open => BranchPullRequestState::Open,
-            PullRequestState::Merged => BranchPullRequestState::Merged,
-            PullRequestState::Closed => BranchPullRequestState::Closed,
-        },
-        ci,
-        failing_checks,
-        checks: checks.into_iter().map(to_check_info).collect(),
-    }
-}
-
 fn to_check_info(check: PullRequestCheck) -> PullRequestCheckInfo {
     PullRequestCheckInfo {
         name: check.name,
@@ -209,78 +199,45 @@ fn to_check_info(check: PullRequestCheck) -> PullRequestCheckInfo {
     }
 }
 
-/// The pull request whose head is `branch`, with what CI says about it.
-///
-/// Polled by the session panel, so every avoidable request matters: CI is only asked for a pull
-/// request that is still open, because a merged or closed one's checks change nothing the card
-/// shows and would double the request count for every landed branch still on screen.
-#[tauri::command]
-#[specta::specta]
-pub async fn find_branch_pull_request(
-    app_state: State<'_, Arc<AppState>>,
-    project_id: i32,
-    branch: String,
-) -> Result<Option<BranchPullRequestInfo>, String> {
-    let (config, token, instance_url) = resolve_target(app_state.inner(), project_id).await?;
-
-    if !supports_branch_lookup(&config) {
-        return Err(format!(
-            "Maestro cannot look up a pull request by branch on `{}` yet.",
-            config.provider
-        ));
+fn to_row_detail(detail: ListedPullRequestDetail) -> PullRequestRowDetail {
+    PullRequestRowDetail {
+        additions: detail.additions,
+        deletions: detail.deletions,
+        changed_files: detail.changed_files,
+        ci: match detail.ci {
+            CiRollup::Passing => PullRequestCiRollup::Passing,
+            CiRollup::Failing => PullRequestCiRollup::Failing,
+            CiRollup::Running => PullRequestCiRollup::Running,
+            CiRollup::Unknown => PullRequestCiRollup::Unknown,
+        },
     }
-
-    let target =
-        PullRequestTarget { config: &config, instance_url: instance_url.as_deref(), token: &token };
-
-    let Some(found) = find_pull_request_by_head(&target, &branch).await? else {
-        return Ok(None);
-    };
-
-    // A settled pull request gets neither of the two extra requests below. Its checks cannot
-    // change, and the numbers describe work that has already landed or been abandoned.
-    if !matches!(found.details.state, PullRequestState::Open) {
-        return Ok(Some(to_info(
-            found,
-            None,
-            Vec::new(),
-            Vec::new(),
-            PullRequestSummary::default(),
-        )));
-    }
-
-    // Asked at once: they are independent questions about the same pull request, and this runs
-    // while the user is waiting for the card's first paint.
-    let (checks, summary) = tokio::join!(
-        fetch_ci_checks(&target, found.number, found.details.head_sha.as_deref()),
-        fetch_pull_request_summary(&target, found.number),
-    );
-
-    // Neither may take the card down with it: the pull request itself was found, and a card
-    // missing its line counts is better than an error where the card was.
-    let checks = checks.unwrap_or_else(|e| {
-        log::debug!("Could not read CI for pull request #{}: {}", found.number, e);
-        Vec::new()
-    });
-    let summary = summary.unwrap_or_else(|e| {
-        log::debug!("Could not read pull request #{} in full: {}", found.number, e);
-        PullRequestSummary::default()
-    });
-
-    // Derived from the same list the rows come from rather than fetched separately, so the badge
-    // and the rows can never disagree about one pull request.
-    let (ci, failing_checks) = ci_summary(&summarise_checks(&checks));
-
-    Ok(Some(to_info(found, ci, failing_checks, checks, summary)))
 }
 
-/// Every pull request open on the project's forge.
+fn to_project_pull_request(entry: ListedPullRequest) -> ProjectPullRequest {
+    ProjectPullRequest {
+        number: entry.number,
+        url: entry.url,
+        title: entry.title,
+        head_branch: entry.head_branch,
+        base_branch: entry.base_branch,
+        created_at: entry.created_at,
+        head_sha: entry.head_sha,
+        updated_at: entry.updated_at,
+        detail: entry.detail.map(to_row_detail),
+    }
+}
+
+/// One page of the pull requests open on the project's forge.
 ///
-/// One request answers the whole Worktrees view. The alternative — [`find_branch_pull_request`] per
-/// card — gets slower as a project accumulates worktrees, which is the wrong direction for a view
-/// whose whole purpose is having a lot of them.
+/// A page, never the whole list — `nixpkgs` has around eleven thousand open at once, so every answer
+/// this could give is a page and the only real choice is whether the caller is told which one. It is
+/// told: `total` and `next_cursor` come back with the rows.
 ///
-/// Answers `Ok(vec![])` rather than an error when the project has no forge or no credential: a
+/// `search` is handed to the forge rather than applied here. Filtering thirty rows out of eleven
+/// thousand finds almost nothing and looks like an empty project, so a forge that cannot search
+/// says so through `forge_searches_pull_requests` and the panel shows no box at all.
+///
+/// Answers an empty page rather than an error when the project has no forge or no credential: a
 /// project that never connected one should show no pull requests, not an error strip over a view
 /// that works perfectly well without them.
 #[tauri::command]
@@ -288,85 +245,116 @@ pub async fn find_branch_pull_request(
 pub async fn list_project_pull_requests(
     app_state: State<'_, Arc<AppState>>,
     project_id: i32,
-) -> Result<Vec<ProjectPullRequest>, String> {
+    cursor: Option<String>,
+    search: Option<String>,
+) -> Result<PullRequestPageInfo, String> {
+    let empty = PullRequestPageInfo { items: Vec::new(), next_cursor: None, total: None };
+
     let Ok((config, token, instance_url)) = resolve_target(app_state.inner(), project_id).await
     else {
-        return Ok(Vec::new());
+        return Ok(empty);
     };
 
-    if !supports_branch_lookup(&config) {
-        return Ok(Vec::new());
+    if !supports_pull_request_list(&config) {
+        return Ok(empty);
     }
 
     let target =
         PullRequestTarget { config: &config, instance_url: instance_url.as_deref(), token: &token };
 
-    let listed = list_open_pull_requests(&target).await?;
-    Ok(listed
-        .into_iter()
-        .map(|entry| ProjectPullRequest {
-            number: entry.number,
-            url: entry.url,
-            title: entry.title,
-            head_branch: entry.head_branch,
-            base_branch: entry.base_branch,
-            created_at: entry.created_at,
-            head_sha: entry.head_sha,
-        })
-        .collect())
-}
+    // A blank box is not a search. Passing one through would ask GitHub for `is:pr is:open` with a
+    // trailing space and rank by relevance, quietly reordering the list the moment the user clears
+    // what they typed.
+    let term = search.as_deref().map(str::trim).filter(|term| !term.is_empty());
 
-/// The line and file counts for one pull request.
-///
-/// Split from the list above because no forge's list endpoint carries them, and split from
-/// [`find_branch_pull_request`] because the caller here already has the number. These only change
-/// when the head commit does, so the frontend caches the answer against the head sha rather than
-/// re-asking on every poll — which is what makes a panel of twenty pull requests affordable.
-#[tauri::command]
-#[specta::specta]
-pub async fn fetch_pull_request_facts(
-    app_state: State<'_, Arc<AppState>>,
-    project_id: i32,
-    number: i64,
-) -> Result<PullRequestFacts, String> {
-    let (config, token, instance_url) = resolve_target(app_state.inner(), project_id).await?;
-    let target =
-        PullRequestTarget { config: &config, instance_url: instance_url.as_deref(), token: &token };
-
-    let summary = fetch_pull_request_summary(&target, number).await?;
-    Ok(PullRequestFacts {
-        commits: summary.commits,
-        changed_files: summary.changed_files,
-        additions: summary.additions,
-        deletions: summary.deletions,
-        mergeable: summary.mergeable,
+    let page = list_open_pull_requests(&target, cursor.as_deref(), term).await?;
+    Ok(PullRequestPageInfo {
+        items: page.items.into_iter().map(to_project_pull_request).collect(),
+        next_cursor: page.next_cursor,
+        total: page.total,
     })
 }
 
-/// Just the checks for one pull request, for the panel's fast poll.
+/// The counts and CI verdict for one row whose list entry did not carry them.
 ///
-/// Split from [`find_branch_pull_request`] because the two things on that card move at very
-/// different speeds. A pull request's title, branches and line counts change when somebody pushes;
-/// its checks change while you watch. Polling both at the rate the checks need would re-ask the
-/// forge for four things to learn one, and polling the checks at the rate the rest needs makes the
-/// panel useless for the thing it is actually being watched for.
+/// Called once per pull request, when it is first seen, and then held against
+/// `(number, head_sha, updated_at)` — so the steady-state cost of a page is zero and only a new
+/// pull request, a push, or a CI transition pays for anything.
 ///
-/// Takes the number the lookup already found rather than searching by branch again — one request
-/// on GitHub, against the three the full call makes.
+/// Never called on GitHub, whose list request answers this for free, and never on Bitbucket or Azure
+/// DevOps, whose rows arrive with an empty answer rather than an absent one precisely so that
+/// nothing asks.
 #[tauri::command]
 #[specta::specta]
-pub async fn fetch_branch_pull_request_checks(
+pub async fn fetch_pull_request_row_detail(
     app_state: State<'_, Arc<AppState>>,
     project_id: i32,
     number: i64,
     head_sha: Option<String>,
-) -> Result<Vec<PullRequestCheckInfo>, String> {
+) -> Result<PullRequestRowDetail, String> {
     let (config, token, instance_url) = resolve_target(app_state.inner(), project_id).await?;
     let target =
         PullRequestTarget { config: &config, instance_url: instance_url.as_deref(), token: &token };
 
-    let checks = fetch_ci_checks(&target, number, head_sha.as_deref()).await?;
-    Ok(checks.into_iter().map(to_check_info).collect())
+    Ok(to_row_detail(fetch_row_detail(&target, number, head_sha.as_deref()).await?))
+}
+
+/// The whole session card for one branch: which pull request, what state, and its checks.
+///
+/// Asked by branch on every poll rather than detected once and then tracked by number. That is what
+/// makes coming back to a session pick up a `#10` that was closed and replaced by a `#11` somebody
+/// opened on the forge, with no second query and no remembered number to go stale.
+///
+/// Deliberately *not* the project-wide open list. That list is one page of a repository which may
+/// have eleven thousand open pull requests, so a session's own drops off it whenever colleagues are
+/// busier than the user — and a branch missing from a page is indistinguishable from a branch with
+/// no pull request. This asks about one branch and is exact at any project size.
+///
+/// `Ok(None)` for a project with no forge or no credential, and for a forge that cannot be asked:
+/// a session that never connected one should show no card, not an error strip on a 30-second timer.
+#[tauri::command]
+#[specta::specta]
+pub async fn fetch_branch_pull_request(
+    app_state: State<'_, Arc<AppState>>,
+    project_id: i32,
+    branch: String,
+) -> Result<Option<BranchPullRequestInfo>, String> {
+    let Ok((config, token, instance_url)) = resolve_target(app_state.inner(), project_id).await
+    else {
+        return Ok(None);
+    };
+
+    if !finds_pull_request_by_branch(&config) {
+        return Ok(None);
+    }
+
+    let target =
+        PullRequestTarget { config: &config, instance_url: instance_url.as_deref(), token: &token };
+
+    let Some(found) = fetch_branch_pull_request_on_forge(&target, &branch).await? else {
+        return Ok(None);
+    };
+
+    Ok(Some(BranchPullRequestInfo {
+        number: found.number,
+        url: found.url,
+        state: match found.detail.state {
+            PullRequestState::Open => BranchPullRequestState::Open,
+            PullRequestState::Merged => BranchPullRequestState::Merged,
+            PullRequestState::Closed => BranchPullRequestState::Closed,
+        },
+        title: found.detail.title,
+        base_branch: found.detail.base_ref,
+        head_branch: found.detail.head_ref,
+        head_sha: found.detail.head_sha,
+        created_at: found.detail.created_at,
+        commits: found.detail.commits,
+        changed_files: found.detail.changed_files,
+        additions: found.detail.additions,
+        deletions: found.detail.deletions,
+        mergeable: found.detail.mergeable,
+        checks: found.checks.into_iter().map(to_check_info).collect(),
+    }))
 }
 
 /// Open a pull request from `branch` into `base`, touching no task.
@@ -407,30 +395,14 @@ pub async fn open_pull_request_for_branch(
     .await?;
 
     log::info!("Opened pull request {} from branch {}", created.url, branch);
-    Ok(OpenedPullRequest { number: created.number, url: created.url })
+    Ok(OpenedPullRequest {
+        number: created.number,
+        url: created.url,
+        head_sha: created.head_sha,
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `Unknown` has to reach the card as "no answer" rather than as a fourth badge: it is what a
-    /// forge with no CI configured returns, and painting that as pending would leave a spinner on
-    /// screen for the life of the pull request.
-    #[test]
-    fn an_unknown_ci_state_carries_no_verdict() {
-        assert!(matches!(ci_summary(&CiState::Unknown), (None, checks) if checks.is_empty()));
-        assert!(matches!(ci_summary(&CiState::Passing), (Some(PullRequestCi::Passing), _)));
-        assert!(matches!(ci_summary(&CiState::Pending), (Some(PullRequestCi::Pending), _)));
-    }
-
-    /// The failing names are the whole point of the seeded prompt — dropping them would leave the
-    /// agent to go and find out what broke.
-    #[test]
-    fn failing_checks_are_named() {
-        let (ci, checks) =
-            ci_summary(&CiState::Failing(vec!["build".into(), "e2e (windows)".into()]));
-        assert!(matches!(ci, Some(PullRequestCi::Failing)));
-        assert_eq!(checks, vec!["build", "e2e (windows)"]);
-    }
-}
+// The verdict these handlers used to compute is now derived where it is rendered — see `deriveCi`
+// in `side-panel/shipActions.ts`, which the card's checks poll feeds directly. `summarise_checks`
+// on the Rust side still answers the pipeline's own question and keeps its tests in
+// `pull_request.rs`.

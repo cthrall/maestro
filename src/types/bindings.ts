@@ -792,70 +792,65 @@ async reconcilePullRequests(projectId: number) : Promise<Result<number[], string
 }
 },
 /**
- * The pull request whose head is `branch`, with what CI says about it.
+ * The whole session card for one branch: which pull request, what state, and its checks.
  * 
- * Polled by the session panel, so every avoidable request matters: CI is only asked for a pull
- * request that is still open, because a merged or closed one's checks change nothing the card
- * shows and would double the request count for every landed branch still on screen.
+ * Asked by branch on every poll rather than detected once and then tracked by number. That is what
+ * makes coming back to a session pick up a `#10` that was closed and replaced by a `#11` somebody
+ * opened on the forge, with no second query and no remembered number to go stale.
+ * 
+ * Deliberately *not* the project-wide open list. That list is one page of a repository which may
+ * have eleven thousand open pull requests, so a session's own drops off it whenever colleagues are
+ * busier than the user — and a branch missing from a page is indistinguishable from a branch with
+ * no pull request. This asks about one branch and is exact at any project size.
+ * 
+ * `Ok(None)` for a project with no forge or no credential, and for a forge that cannot be asked:
+ * a session that never connected one should show no card, not an error strip on a 30-second timer.
  */
-async findBranchPullRequest(projectId: number, branch: string) : Promise<Result<BranchPullRequestInfo | null, string>> {
+async fetchBranchPullRequest(projectId: number, branch: string) : Promise<Result<BranchPullRequestInfo | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("find_branch_pull_request", { projectId, branch }) };
+    return { status: "ok", data: await TAURI_INVOKE("fetch_branch_pull_request", { projectId, branch }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Just the checks for one pull request, for the panel's fast poll.
+ * The counts and CI verdict for one row whose list entry did not carry them.
  * 
- * Split from [`find_branch_pull_request`] because the two things on that card move at very
- * different speeds. A pull request's title, branches and line counts change when somebody pushes;
- * its checks change while you watch. Polling both at the rate the checks need would re-ask the
- * forge for four things to learn one, and polling the checks at the rate the rest needs makes the
- * panel useless for the thing it is actually being watched for.
+ * Called once per pull request, when it is first seen, and then held against
+ * `(number, head_sha, updated_at)` — so the steady-state cost of a page is zero and only a new
+ * pull request, a push, or a CI transition pays for anything.
  * 
- * Takes the number the lookup already found rather than searching by branch again — one request
- * on GitHub, against the three the full call makes.
+ * Never called on GitHub, whose list request answers this for free, and never on Bitbucket or Azure
+ * DevOps, whose rows arrive with an empty answer rather than an absent one precisely so that
+ * nothing asks.
  */
-async fetchBranchPullRequestChecks(projectId: number, number: number, headSha: string | null) : Promise<Result<PullRequestCheckInfo[], string>> {
+async fetchPullRequestRowDetail(projectId: number, number: number, headSha: string | null) : Promise<Result<PullRequestRowDetail, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("fetch_branch_pull_request_checks", { projectId, number, headSha }) };
+    return { status: "ok", data: await TAURI_INVOKE("fetch_pull_request_row_detail", { projectId, number, headSha }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Every pull request open on the project's forge.
+ * One page of the pull requests open on the project's forge.
  * 
- * One request answers the whole Worktrees view. The alternative — [`find_branch_pull_request`] per
- * card — gets slower as a project accumulates worktrees, which is the wrong direction for a view
- * whose whole purpose is having a lot of them.
+ * A page, never the whole list — `nixpkgs` has around eleven thousand open at once, so every answer
+ * this could give is a page and the only real choice is whether the caller is told which one. It is
+ * told: `total` and `next_cursor` come back with the rows.
  * 
- * Answers `Ok(vec![])` rather than an error when the project has no forge or no credential: a
+ * `search` is handed to the forge rather than applied here. Filtering thirty rows out of eleven
+ * thousand finds almost nothing and looks like an empty project, so a forge that cannot search
+ * says so through `forge_searches_pull_requests` and the panel shows no box at all.
+ * 
+ * Answers an empty page rather than an error when the project has no forge or no credential: a
  * project that never connected one should show no pull requests, not an error strip over a view
  * that works perfectly well without them.
  */
-async listProjectPullRequests(projectId: number) : Promise<Result<ProjectPullRequest[], string>> {
+async listProjectPullRequests(projectId: number, cursor: string | null, search: string | null) : Promise<Result<PullRequestPageInfo, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_project_pull_requests", { projectId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * The line and file counts for one pull request.
- * 
- * Split from the list above because no forge's list endpoint carries them, and split from
- * [`find_branch_pull_request`] because the caller here already has the number. These only change
- * when the head commit does, so the frontend caches the answer against the head sha rather than
- * re-asking on every poll — which is what makes a panel of twenty pull requests affordable.
- */
-async fetchPullRequestFacts(projectId: number, number: number) : Promise<Result<PullRequestFacts, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("fetch_pull_request_facts", { projectId, number }) };
+    return { status: "ok", data: await TAURI_INVOKE("list_project_pull_requests", { projectId, cursor, search }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2561,40 +2556,22 @@ export type BranchList = { local: string[]; remote: string[] }
  */
 export type BranchMode = "Create" | "Checkout"
 /**
- * The pull request open on a session's branch, as the Overview card renders it.
+ * The pull request on a session's branch, whole.
+ * 
+ * One shape because it is one question and, on GitHub, one request. Detection, state and CI were
+ * three queries at three rates until measuring showed a single-pull-request GraphQL call carrying
+ * all of it costs one point — and that splitting them is what let the card's header and its check
+ * ring describe two different moments.
  */
-export type BranchPullRequestInfo = { number: number; url: string; title: string; state: BranchPullRequestState; 
+export type BranchPullRequestInfo = { number: number; url: string; state: BranchPullRequestState; title: string | null; base_branch: string | null; head_branch: string | null; head_sha: string | null; created_at: string | null; commits: number | null; changed_files: number | null; additions: number | null; deletions: number | null; 
 /**
- * `None` on a forge that will not report CI — Gitea and Forgejo always, and anywhere the
- * request failed. The card drops its checks block rather than showing a spinner that will
- * never resolve.
+ * `false` is a conflict to resolve; `None` is the forge still computing the merge commit.
  */
-ci: PullRequestCi | null; 
+mergeable: boolean | null; 
 /**
- * Names of the checks that failed, and empty unless `ci` is `Failing`. Carried so the panel
- * can seed a prompt that names them rather than telling the agent to go and look.
+ * Empty on a forge that names no checks, and for a pull request that has already landed.
  */
-failing_checks: string[]; 
-/**
- * Every check the forge would name, so the card can show a rollup and the individual rows
- * rather than repeating the one-word verdict. Empty on a forge that will not enumerate, which
- * is what the card reads as "no checks block".
- */
-checks: PullRequestCheckInfo[]; 
-/**
- * The head commit, which the fast checks poll needs to ask about CI without re-finding the
- * pull request. `None` on a forge whose list endpoint does not carry it.
- */
-head_sha: string | null; 
-/**
- * RFC 3339, for the "opened 12m ago" line.
- */
-created_at: string | null; base_branch: string | null; head_branch: string | null; commits: number | null; changed_files: number | null; additions: number | null; deletions: number | null; 
-/**
- * `false` is a conflict the user has to resolve. `None` is the forge still computing the
- * merge commit, which the card must not paint as either answer — see `PullRequestDetails`.
- */
-mergeable: boolean | null }
+checks: PullRequestCheckInfo[] }
 /**
  * What became of a pull request, for the panel.
  * 
@@ -2662,14 +2639,43 @@ config: ProjectCodeHostingConfig | null;
  */
 forge_supports_pull_requests: boolean; 
 /**
- * Whether this forge can be asked which pull request a branch belongs to.
+ * Whether this forge can be asked for its open pull requests.
  * 
- * Separate from `forge_supports_pull_requests` because the two are genuinely different sets:
- * Bitbucket and Azure DevOps can have a pull request opened on them but cannot yet be searched
- * by head branch. The session panel polls only when this is true, so that an unsupported forge
- * costs no requests rather than one failing request every thirty seconds.
+ * What the Worktrees view rests on: every worktree card finds its pull request in that list.
+ * Separate from `forge_supports_pull_requests` because the two are different questions —
+ * opening one and enumerating them are different endpoints, and a forge could gain either
+ * first. The view polls only when this is true, so a forge without a lister costs no requests
+ * rather than one failing request per cycle.
  */
-forge_supports_branch_lookup: boolean; 
+forge_supports_pull_request_list: boolean; 
+/**
+ * Whether this forge can be asked for the pull request on one branch.
+ * 
+ * What the *session* card rests on, and deliberately not the list above. That list is one page
+ * of a project which may have thousands of open pull requests, so a branch missing from it is
+ * indistinguishable from a branch that has none — which is a card silently disappearing on a
+ * busy repository.
+ */
+forge_finds_pull_request_by_branch: boolean; 
+/**
+ * Whether the panel should show a search box.
+ * 
+ * Half the forges cannot search pull requests at all: Gitea and Forgejo take no `q` on their
+ * pull request list and search only through an issues endpoint that names no head branch, and
+ * Azure DevOps has no text criterion. The box is hidden rather than degraded to filtering the
+ * visible page, which would make one control mean the project on three providers and thirty
+ * rows on the other three.
+ */
+forge_searches_pull_requests: boolean; 
+/**
+ * Whether this forge will name its individual checks.
+ * 
+ * Weaker than "has CI": Bitbucket reports a verdict Maestro can read without enumerating
+ * anything, and Gitea's commit-status shape has moved between versions. The card's rollup
+ * needs names, so it polls only when this is true — without it the checks query asks every ten
+ * seconds for a list that is empty by construction and can never become anything else.
+ */
+forge_enumerates_checks: boolean; 
 /**
  * Whether this call wrote `code_hosting` into `.maestro/settings.json`.
  */
@@ -2890,7 +2896,14 @@ export type NewProjectColor =
  * Leave the project colourless so it follows the global default.
  */
 "global"
-export type OpenedPullRequest = { number: number; url: string }
+export type OpenedPullRequest = { number: number; url: string; 
+/**
+ * Lets the caller put the new pull request straight into its cached open list instead of
+ * waiting out a poll: every other field it needs was in the request, and this is the one the
+ * checks query is keyed on. `None` on a forge whose create response omits it — see
+ * [`CreatedPullRequest::head_sha`].
+ */
+head_sha: string | null }
 /**
  * How the current phase is going.
  * 
@@ -2987,17 +3000,26 @@ remote_name: string | null;
 base_branch: string | null }
 export type ProjectIssueTrackingConfig = { provider: string; integration_id?: string | null; owner?: string | null; repo?: string | null; project_path?: string | null; team_id?: string | null; project_key?: string | null; project_name?: string | null }
 /**
- * One open pull request, as the Worktrees view's panel and card chips read it.
+ * One open pull request, as the Worktrees view's panel reads it.
  * 
- * Deliberately thinner than [`BranchPullRequestInfo`]: no state, because every entry here is open;
- * no checks and no line counts, because both cost a request each and are fetched against
- * [`head_sha`](Self::head_sha) so they survive a poll that changed nothing.
+ * No state, because every entry here is open by definition.
  */
 export type ProjectPullRequest = { number: number; url: string; title: string; 
 /**
  * What the Worktrees view matches a worktree's `branch_name` against.
  */
-head_branch: string; base_branch: string | null; created_at: string | null; head_sha: string | null }
+head_branch: string; base_branch: string | null; created_at: string | null; head_sha: string | null; 
+/**
+ * Part of the key the frontend holds `detail` under. `head_sha` alone would miss a CI run that
+ * started or finished without a new commit, and the row would keep its first answer forever.
+ */
+updated_at: string | null; 
+/**
+ * `None` means *unasked*, and is the caller's signal to fetch it for this row with
+ * [`fetch_pull_request_row_detail`]. GitHub fills it here from the same GraphQL request that
+ * produced the row, so on GitHub that command is never called at all.
+ */
+detail: PullRequestRowDetail | null }
 /**
  * A Maestro branch with no worktree and nothing on the remote holding it — the only kind this
  * offers to delete.
@@ -3030,13 +3052,36 @@ export type PullRequestCheckStatus = "Passed" | "Failed" | "Running"
  */
 export type PullRequestCi = "Passing" | "Failing" | "Pending"
 /**
- * What a pull request's diff amounts to: the fields a *list* endpoint does not carry.
+ * A row's CI as one mark.
  * 
- * Every field is optional because the forges disagree about which they answer — GitLab reports no
- * line counts on the merge request at all — and an absent one renders as a dropped metric rather
- * than a zero.
+ * Mirrors [`CiRollup`]. A verdict rather than a list of names, because naming the checks is what
+ * made the query this replaces cost a hundred times as much — and a row draws one coloured icon.
+ * Names are still read where they are shown: the session panel and the worktree card chip both ask
+ * about a single branch and get the full list.
  */
-export type PullRequestFacts = { commits: number | null; changed_files: number | null; additions: number | null; deletions: number | null; mergeable: boolean | null }
+export type PullRequestCiRollup = "Passing" | "Failing" | "Running" | "Unknown"
+/**
+ * One page of a project's open pull requests.
+ */
+export type PullRequestPageInfo = { items: ProjectPullRequest[]; 
+/**
+ * Pass back verbatim to ask for the next page. Opaque — a GraphQL cursor on GitHub, a row
+ * offset elsewhere — and `None` when there is no next page.
+ */
+next_cursor: string | null; 
+/**
+ * How many are open in total, where the forge says so cheaply. `None` on Bitbucket Server and
+ * Azure DevOps, whose responses carry no total at all; the header then reports how many it is
+ * showing rather than inventing a denominator.
+ */
+total: number | null }
+/**
+ * The line counts, file count and CI verdict a row shows.
+ * 
+ * The same shape whether it arrived inside the list or from the per-row command, so the frontend
+ * has one type for "what this row knows" and no branch on where it came from.
+ */
+export type PullRequestRowDetail = { additions: number | null; deletions: number | null; changed_files: number | null; ci: PullRequestCiRollup }
 /**
  * What the board shows: how many slots this host has, how many are taken, and why.
  */
