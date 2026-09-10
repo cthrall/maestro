@@ -1,5 +1,5 @@
 import { Loader2, WifiOff, AlertTriangle, LogOut } from "lucide-react";
-import type { ConnectionHealthState } from "@/utils/hooks/useConnectionHealth";
+import type { ConnectionHealthState } from "@/hooks/useConnectionHealth";
 import type { ConnectionKey } from "@/types/bindings";
 
 interface DisconnectBackdropProps {
@@ -10,10 +10,12 @@ interface DisconnectBackdropProps {
   onLeaveConnection: () => void;
 }
 
-/// Only SSH can put itself back, so it is the only one told that anything is being attempted.
-/// The rest say what happened and leave the next move to the user — offering to restart a
-/// container or a distro is a capability maestro does not have yet, and implying otherwise
-/// would be worse than saying nothing.
+/**
+ * Only SSH can put itself back, so it is the only one told that anything is being attempted.
+ * The rest say what happened and leave the next move to the user — offering to restart a
+ * container or a distro is a capability maestro does not have yet, and implying otherwise
+ * would be worse than saying nothing.
+ */
 function describe(connection: ConnectionKey): { title: string; detail: string } {
   switch (connection.type) {
     case "ssh":

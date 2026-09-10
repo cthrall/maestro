@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, lazy, Suspense, useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ShortcutHintProvider } from "@/components/common/shortcut-hint/ShortcutHintProvider";
-import { useShortcuts } from "@/utils/hooks/useShortcuts";
+import { useShortcuts } from "@/hooks/useShortcuts";
 import { motion, useAnimationControls } from "framer-motion";
 import { useSelectedProject, useSelectedProjectActions } from "@/store/projectStore";
 import { AppHeader } from "@/components/layout/app-header/AppHeader";
@@ -11,7 +11,8 @@ import {
   useCleanupZombieWorktreesMutation,
   usePrefetchWorktrees,
 } from "@/services/worktree.service";
-import { useConnectionHealth } from "@/utils/hooks/useConnectionHealth";
+import { useConnectionHealth } from "@/hooks/useConnectionHealth";
+import { useServerEventSync } from "@/services/tauri-events";
 import { DisconnectBackdrop } from "@/components/common/disconnect-backdrop/DisconnectBackdrop";
 import {
   useActiveTab,
@@ -22,9 +23,10 @@ import {
 import { useProjectSettings } from "@/services/project.service";
 import { PAGE_TRANSITION_DURATION, PAGE_TRANSITION_EASING } from "@/utils/constants/animations";
 import { KanbanProvider } from "@/contexts/KanbanContext";
+import { BoardActionsProvider } from "@/contexts/BoardActionsContext";
 import { connectionKeyFromProject } from "@/lib/connection-utils";
 import { TooltipProvider } from "@/ui/tooltip";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import {
   integrationQueryKeys,
   useDetectIssueTracking,
@@ -153,6 +155,10 @@ function App() {
       currentProject?.docker_connection_id,
     ],
   );
+
+  // The backend's change events, subscribed once here rather than inside each list hook — those
+  // are called per card, so a listener in the hook was one native subscription per card.
+  useServerEventSync(projectId);
 
   // Health of whichever connection this project lives on — every type, not just SSH.
   const {
@@ -296,7 +302,9 @@ function App() {
                   connection={connection}
                   onTaskClick={NOOP}
                 >
-                  <KanbanView />
+                  <BoardActionsProvider>
+                    <KanbanView />
+                  </BoardActionsProvider>
                 </KanbanProvider>
               </Suspense>
             </motion.div>

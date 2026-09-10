@@ -3,7 +3,7 @@ import { ShortcutHint } from "@/components/common/shortcut-hint/ShortcutHint";
 import { motion, LayoutGroup } from "framer-motion";
 import { Button } from "@/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/ui/tooltip";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { LayoutDashboard, Bot, FolderGit2, Settings, FolderOpen } from "lucide-react";
 import { ThemeToggle } from "@/components/common/theme-toggle/ThemeToggle";
 import { AccentColorPicker } from "@/components/common/accent-color-picker/AccentColorPicker";
@@ -27,8 +27,10 @@ interface AppHeaderProps {
   onViewChange: (view: ViewType) => void;
   onProjectChange?: (project: Project) => void;
   onBackToPicker?: () => void;
-  /// The connection stopped answering but is still open — reported here rather than as a
-  /// blocking overlay, because nothing has necessarily failed.
+  /**
+   * The connection stopped answering but is still open — reported here rather than as a
+   * blocking overlay, because nothing has necessarily failed.
+   */
   connectionQuiet?: boolean;
 }
 

@@ -3,7 +3,7 @@ import { useActiveTab } from "@/store/navigationStore";
 import { DiffModeEnum } from "@git-diff-view/react";
 import { ChevronDown, TriangleAlert } from "lucide-react";
 import { parseDiffString } from "@/lib/diff-utils";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { DiffActionBar } from "./DiffActionBar";
 import { type PendingComment } from "./DiffViewer";
 import { DiffFileStack, type DiffFileStackHandle, type DiffReviewApi } from "./DiffFileStack";
@@ -43,7 +43,7 @@ import { useCodeHostingStatus } from "@/services/integration.service";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { useReviewStore } from "@/store/reviewStore";
-import { api } from "@/utils/helpers/tauri-utils";
+import { api } from "@/lib/tauri-utils";
 import { displayItemPath } from "@/types/review";
 import type { DiffTarget, MergeResult, Task } from "@/types/bindings";
 
@@ -57,11 +57,15 @@ const MERGE_STRATEGIES: Record<string, string> = {
 
 interface TaskReviewPanelProps {
   task: Task;
-  /// Where to run git for this review — the worktree, or the project itself when the task runs
-  /// without one. Everything that reads the code uses this.
+  /**
+   * Where to run git for this review — the worktree, or the project itself when the task runs
+   * without one. Everything that reads the code uses this.
+   */
   reviewPath: string | null;
-  /// The worktree, if the task has one. Only things that act on the worktree as an object — the
-  /// approve strategy, the discard warning — may use this.
+  /**
+   * The worktree, if the task has one. Only things that act on the worktree as an object — the
+   * approve strategy, the discard warning — may use this.
+   */
   worktreePath: string | null;
   baseBranch: string | null;
   branchName: string | null;
