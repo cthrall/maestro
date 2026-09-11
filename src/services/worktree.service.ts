@@ -1,6 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useCallback } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useCallback } from "react";
 import { api } from "@/lib/tauri-utils";
 import { createErrorToastHandler } from "@/lib/error-utils";
 import { toast } from "sonner";
@@ -17,7 +16,9 @@ export const worktreeQueryKeys = {
 };
 
 /**
- * Event-driven worktree list. Refreshes on "worktrees-changed" Tauri event.
+ * The project's worktree list. Kept fresh by the app-wide `worktrees-changed` subscription in
+ * `useServerEventSync` rather than a listener of its own — this hook is called per card, and a
+ * subscription here turned one event into one invalidation of the whole prefix per caller.
  *
  * `refetchInterval` exists for the session panel, whose commit/push gate reads
  * `changed_files_count` and `ahead_behind` from these rows: an agent committing inside its
@@ -31,20 +32,6 @@ export function useWorktreesQuery(
   repoPath: string | undefined,
   options?: { refetchInterval?: number | false },
 ) {
-  const queryClient = useQueryClient();
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen("worktrees-changed", () => {
-      void queryClient.invalidateQueries({ queryKey: worktreeQueryKeys.base });
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => {
-      unlisten?.();
-    };
-  }, [queryClient]);
-
   return useQuery({
     queryKey: worktreeQueryKeys.list(projectId ?? 0),
     queryFn: () => api.listWorktreesWithStatus(projectId!, repoPath!),
@@ -243,6 +230,23 @@ export function usePullWorktreeMutation() {
 }
 
 /**
+ * Refresh a project's remote-tracking refs, which is what the cards' behind counts are measured
+ * against.
+ *
+ * Deliberately silent: no toast and no invalidation of its own. The backend throttles an unforced
+ * call and emits `worktrees-changed` when it actually fetched, and the two callers want opposite
+ * error behaviour — a refresh the user pressed should say why it failed, one triggered by opening
+ * the tab should not.
+ */
+export function useFetchProjectRemoteMutation() {
+  return useMutation({
+    mutationFn: async ({ projectId, force }: { projectId: number; force: boolean }) => {
+      return await api.fetchProjectRemote(projectId, force);
+    },
+  });
+}
+
+/**
  * Mutation hook for cleaning up zombie worktrees on project open.
  * Silent on error — this is background housekeeping, not user-initiated.
  * Invalidates worktree list only when zombies were actually deleted.
@@ -332,6 +336,7 @@ export function useCreateWorktreeMutation() {
       newBranchName,
       uniqueSuffix = false,
       repoPath,
+      pullRequest = null,
     }: {
       projectId: number;
       taskId: number | null;
@@ -340,6 +345,8 @@ export function useCreateWorktreeMutation() {
       /** Only meaningful for a session worktree — see `create_worktree`. */
       uniqueSuffix?: boolean;
       repoPath: string;
+      /** Checks out a fork's pull request instead of `baseBranch` — see `create_worktree`. */
+      pullRequest?: number | null;
     }) => {
       return await api.createWorktree(
         projectId,
@@ -348,6 +355,7 @@ export function useCreateWorktreeMutation() {
         newBranchName,
         uniqueSuffix,
         repoPath,
+        pullRequest,
       );
     },
     onSuccess: () => {

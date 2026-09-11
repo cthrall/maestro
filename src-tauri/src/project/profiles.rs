@@ -136,6 +136,32 @@ impl ProfilesDocument {
     }
 }
 
+/// Whether the task has explicitly turned this role off, as opposed to leaving it to the project.
+///
+/// The overrides map is role → profile id, where an absent key means "the project decides". That
+/// leaves no way to say "not this task" — a task cannot name the absence of a profile — so a
+/// present key with a null value carries it. The distinction is the whole point: reading the map
+/// with `get(..).flatten()` would collapse both back into "no choice made".
+///
+/// Unreadable JSON is `false`, mirroring `has_profile_for_role`: the caller is deciding whether to
+/// *skip* a stage, and a parse failure is not a reason to skip one.
+pub fn role_is_skipped(overrides_json: Option<&str>, role: AgentRole) -> bool {
+    let Some(raw) = overrides_json else {
+        return false;
+    };
+    let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, Option<String>>>(raw)
+    else {
+        return false;
+    };
+    let Some(role_key) = serde_json::to_value(role)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+    else {
+        return false;
+    };
+    matches!(map.get(&role_key), Some(None))
+}
+
 /// What a profile resolved to for an actual spawn, with anything the agent cannot honour removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct ResolvedProfile {
@@ -269,11 +295,7 @@ async fn git_conn(app_state: &Arc<AppState>, project_id: i32) -> Result<GitConne
 /// run, and a project with no profiles keeps exactly the pipeline it had. Unreadable profiles are
 /// `false` rather than an error — the caller is deciding whether to start an agent, and a parse
 /// failure is not a reason to start one.
-pub async fn has_profile_for_role(
-    app_state: &AppState,
-    project_id: i32,
-    role: AgentRole,
-) -> bool {
+pub async fn has_profile_for_role(app_state: &AppState, project_id: i32, role: AgentRole) -> bool {
     let Ok((_project, conn)) = crate::core::get_project_with_git_conn(app_state, project_id).await
     else {
         return false;
@@ -346,7 +368,11 @@ pub async fn resolve_agent_profile(
         return Ok(None);
     };
 
-    let capabilities = AgentCapabilities { model_ids, mode_ids, supports_effort };
+    let capabilities = AgentCapabilities {
+        model_ids,
+        mode_ids,
+        supports_effort,
+    };
     apply_capabilities(profile, &capabilities).map(Some)
 }
 
@@ -393,11 +419,18 @@ mod tests {
         // No default set: the first profile declaring the role.
         assert_eq!(doc.resolve(AgentRole::Reviewer, None).unwrap().id, "strict");
 
-        doc.defaults.insert("Reviewer".to_string(), "lenient".to_string());
-        assert_eq!(doc.resolve(AgentRole::Reviewer, None).unwrap().id, "lenient");
+        doc.defaults
+            .insert("Reviewer".to_string(), "lenient".to_string());
+        assert_eq!(
+            doc.resolve(AgentRole::Reviewer, None).unwrap().id,
+            "lenient"
+        );
 
         // An explicit choice beats the default.
-        assert_eq!(doc.resolve(AgentRole::Reviewer, Some("strict")).unwrap().id, "strict");
+        assert_eq!(
+            doc.resolve(AgentRole::Reviewer, Some("strict")).unwrap().id,
+            "strict"
+        );
     }
 
     /// An id that no longer exists must not silently pick something else — but it must not strand
@@ -408,7 +441,10 @@ mod tests {
             profiles: vec![profile(AgentRole::Coder)],
             defaults: Default::default(),
         };
-        assert_eq!(doc.resolve(AgentRole::Coder, Some("deleted")).unwrap().id, "coder");
+        assert_eq!(
+            doc.resolve(AgentRole::Coder, Some("deleted")).unwrap().id,
+            "coder"
+        );
     }
 
     #[test]
@@ -418,6 +454,22 @@ mod tests {
             defaults: Default::default(),
         };
         assert!(doc.resolve(AgentRole::Reviewer, None).is_none());
+    }
+
+    /// The three states the map can put a role in, plus the one it cannot be trusted to.
+    #[test]
+    fn only_a_present_null_marks_a_role_as_skipped() {
+        let json = r#"{"Planner": null, "Reviewer": "strict"}"#;
+
+        assert!(role_is_skipped(Some(json), AgentRole::Planner));
+        // Named, so it runs.
+        assert!(!role_is_skipped(Some(json), AgentRole::Reviewer));
+        // Absent, so the project decides — which is not the same as "off".
+        assert!(!role_is_skipped(Some(json), AgentRole::Refiner));
+
+        assert!(!role_is_skipped(None, AgentRole::Planner));
+        assert!(!role_is_skipped(Some("{"), AgentRole::Planner));
+        assert!(!role_is_skipped(Some("[]"), AgentRole::Planner));
     }
 
     #[test]

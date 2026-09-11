@@ -96,7 +96,8 @@ export function UpdateCard() {
               onClick={
                 isPackageInstall ? () => void downloadPackage(status.version) : () => void install()
               }
-              className="h-7 text-xs gap-1.5 bg-accent text-accent-foreground"
+              variant="accent"
+              className="h-7 text-xs gap-1.5"
             >
               <ArrowDownToLine className="w-3 h-3" />
               {isPackageInstall ? "Download" : "Install"}
@@ -135,14 +136,21 @@ export function UpdateCard() {
                 Last checked: {lastCheckedLabel}
               </span>
             </div>
-            <button
-              onClick={handleReloadClick}
-              disabled={isChecking}
-              className="w-8 h-8 rounded-lg border border-border/60 bg-card flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
-              title="Check for updates"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? "animate-spin" : ""}`} />
-            </button>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    onClick={handleReloadClick}
+                    disabled={isChecking}
+                    aria-label="Check for updates"
+                    className="w-8 h-8 rounded-lg border border-border/60 bg-card flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+                  />
+                }
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? "animate-spin" : ""}`} />
+              </TooltipTrigger>
+              <TooltipContent>Check for updates</TooltipContent>
+            </Tooltip>
           </div>
         )}
       </div>

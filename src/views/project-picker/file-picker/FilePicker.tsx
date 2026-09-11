@@ -11,9 +11,9 @@ import {
   BreadcrumbLink,
   BreadcrumbSeparator,
 } from "@/ui/breadcrumb";
-import { usePathNavigation } from "@/utils/hooks/usePathNavigation";
-import { useKeyboardNavigation } from "@/utils/hooks/useKeyboardNavigation";
-import { useFilePickerInitialization } from "@/utils/hooks/useFilePickerInitialization";
+import { usePathNavigation } from "@/hooks/usePathNavigation";
+import { useKeyboardNavigation } from "@/hooks/useKeyboardNavigation";
+import { useFilePickerInitialization } from "@/hooks/useFilePickerInitialization";
 import {
   useListDirectories,
   useWslDirectories,
@@ -251,7 +251,7 @@ export function FilePicker({
         </div>
 
         {/* Directory List */}
-        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+        <div className="flex-1 min-h-0 overflow-y-auto">
           {loading ? (
             <p className="text-sm text-muted-foreground text-center py-8">Loading directories...</p>
           ) : (

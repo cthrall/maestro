@@ -1,11 +1,11 @@
 import { useState, useCallback } from "react";
 import { Bot, Check, Search } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/ui/popover";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { TRIGGER_CLASS, GLASS_CONTENT_CLASS } from "./BaseDropdownSelector";
 import type { SelectorProps } from "./BaseDropdownSelector";
 import type { ConfigOptionValue } from "../types";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/ui/tooltip.tsx";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/ui/tooltip";
 
 function deriveGroup(value: string): string {
   if (value === "default") return "built-in";
@@ -95,7 +95,7 @@ export function AgentSelector({ option, value, onChange, disabled }: SelectorPro
             autoFocus
           />
         </div>
-        <div className="custom-scrollbar max-h-100 overflow-y-auto overflow-x-visible p-1">
+        <div className="max-h-100 overflow-y-auto overflow-x-visible p-1">
           {grouped.length === 0 && (
             <p className="py-4 text-left text-xs text-muted-foreground px-2">No agents match</p>
           )}

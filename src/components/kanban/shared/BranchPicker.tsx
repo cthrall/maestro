@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { GitBranch, Check, Search, RefreshCw, ChevronDown, Sparkles } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { Button } from "@/ui/button";
 import { Popover, PopoverTrigger, PopoverContent } from "@/ui/popover";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/ui/tooltip";
 import { useProjectBranchesQuery, taskQueryKeys } from "@/services/task.service";
 import { useSelectedProject } from "@/store/projectStore";
 
@@ -51,20 +52,18 @@ function BranchList({
     return <p className="px-4 py-3 text-xs text-muted-foreground">No branches found.</p>;
   }
   return (
-    <div className="max-h-48 overflow-y-auto py-1 custom-scrollbar">
+    <div className="max-h-48 overflow-y-auto py-1">
       {branches.map((b) => {
         const reason = unavailable?.(b) ?? null;
-        return (
+        const row = (
           <button
-            key={b}
             type="button"
             disabled={reason !== null}
-            title={reason ?? undefined}
             className={cn(
               "flex items-center gap-2 w-full rounded-md px-3 py-1.5 text-xs transition-colors text-left",
               reason === null
                 ? "hover:bg-muted"
-                : "opacity-50 cursor-not-allowed text-muted-foreground",
+                : "opacity-50 pointer-events-none text-muted-foreground",
             )}
             onClick={() => onSelect(b)}
           >
@@ -75,6 +74,15 @@ function BranchList({
             )}
             {selected === b && <Check className="size-3 shrink-0" />}
           </button>
+        );
+        if (reason === null) return <div key={b}>{row}</div>;
+        return (
+          <Tooltip key={b} trackCursorAxis="x">
+            <TooltipTrigger render={<div className="block cursor-not-allowed" />}>
+              {row}
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">{reason}</TooltipContent>
+          </Tooltip>
         );
       })}
     </div>

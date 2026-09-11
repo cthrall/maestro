@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.25.0](https://github.com/emdgroup/maestro/compare/v0.24.0...v0.25.0) (2026-09-10)
+
+
+### Features
+
+* **tasks:** let a task skip the planning or review stage ([#357](https://github.com/emdgroup/maestro/issues/357)) ([25b119a](https://github.com/emdgroup/maestro/commit/25b119aba769ed842453104a2302afe73ea24980))
+
+
+### Bug Fixes
+
+* **settings:** never offer a pipeline profile a value its agent lacks ([#355](https://github.com/emdgroup/maestro/issues/355)) ([38b27ea](https://github.com/emdgroup/maestro/commit/38b27ea6469434e207b89a48c179450d10bd2eca))
+
+## [0.24.0](https://github.com/emdgroup/maestro/compare/v0.23.0...v0.24.0) (2026-09-09)
+
+### Features
+
+- replace native title tooltips with the tooltip component ([#350](https://github.com/emdgroup/maestro/issues/350)) ([f3ff55b](https://github.com/emdgroup/maestro/commit/f3ff55bc84f3f4c75549a2fe4cf932b0baf7da13))
+- **settings:** restore the startup tab control and rework two appearance controls ([#348](https://github.com/emdgroup/maestro/issues/348)) ([d2b4eba](https://github.com/emdgroup/maestro/commit/d2b4eba9ae50f03e87ae33ab0f8cc96022a0dd88))
+
+## [0.23.0](https://github.com/emdgroup/maestro/compare/v0.22.0...v0.23.0) (2026-09-09)
+
+### Features
+
+- pin the repository card and fetch before reading its counts ([#341](https://github.com/emdgroup/maestro/issues/341)) ([e8bbc1f](https://github.com/emdgroup/maestro/commit/e8bbc1f0666f307838d6b5eb9b703647baa0aa80))
+
+### Bug Fixes
+
+- make the unmerged-archive dialog's actions readable and fit ([#339](https://github.com/emdgroup/maestro/issues/339)) ([8b45449](https://github.com/emdgroup/maestro/commit/8b4544942d5618345ae9399a5a90e534a39398e5))
+
+## [0.22.0](https://github.com/emdgroup/maestro/compare/v0.21.0...v0.22.0) (2026-09-08)
+
+### Features
+
+- answer a plan review from the stream ([#335](https://github.com/emdgroup/maestro/issues/335)) ([7513b71](https://github.com/emdgroup/maestro/commit/7513b71a8623225cf53a7109c074d505dbfe069d))
+- reduce the CPU cost of the accent bubble animation ([#330](https://github.com/emdgroup/maestro/issues/330)) ([87e2848](https://github.com/emdgroup/maestro/commit/87e284882191124dd7376abc0b1d460bb854ffeb))
+
+### Bug Fixes
+
+- send session notifications on Windows ([#320](https://github.com/emdgroup/maestro/issues/320)) ([7672b8b](https://github.com/emdgroup/maestro/commit/7672b8b33426b57ad9fc59da5748e4d652770129))
+
 ## [0.21.0](https://github.com/emdgroup/maestro/compare/v0.20.0...v0.21.0) (2026-09-02)
 
 ### Features

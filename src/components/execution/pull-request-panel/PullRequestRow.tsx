@@ -11,9 +11,13 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/ui/tooltip";
-import { cn } from "@/lib/utils.ts";
-import { usePullRequestFacts } from "@/services/integration.service";
-import { CI_TONE, type CiRollup } from "@/components/execution/worktree-card/pullRequestCi";
+import { cn } from "@/lib/utils";
+import { usePullRequestRowDetail } from "@/services/integration.service";
+import {
+  CI_TONE,
+  rollupOfCi,
+  type CiRollup,
+} from "@/components/execution/worktree-card/pullRequestCi";
 import { relativeAge } from "@/components/execution/worktree-card/worktree-usage";
 import type { PullRequestEntry } from "./pullRequestFilters";
 
@@ -34,6 +38,7 @@ function action(entry: PullRequestEntry): {
   label: string;
   hint: string;
   icon: typeof CornerDownRight;
+  disabled?: boolean;
 } {
   switch (entry.action.kind) {
     case "open-session":
@@ -51,8 +56,19 @@ function action(entry: PullRequestEntry): {
     case "new-worktree":
       return {
         label: "Start session",
-        hint: "Create a worktree for this branch and start a session",
+        hint: entry.action.pullRequestNumber
+          ? "Fetch this fork's branch into a worktree and start a session"
+          : "Create a worktree for this branch and start a session",
         icon: GitBranchPlus,
+      };
+    // Kept in place rather than hidden: the row is still worth reading, and a button that vanished
+    // on some rows and not others reads as a loading state rather than as an answer.
+    case "unsupported":
+      return {
+        label: "Start session",
+        hint: entry.action.reason,
+        icon: GitBranchPlus,
+        disabled: true,
       };
   }
 }
@@ -60,7 +76,6 @@ function action(entry: PullRequestEntry): {
 interface PullRequestRowProps {
   entry: PullRequestEntry;
   projectId: number;
-  ci: CiRollup;
   now: number;
   /** False while the view is off screen. */
   poll: boolean;
@@ -78,21 +93,29 @@ interface PullRequestRowProps {
  * The row itself does nothing on click: the action is a button, and a card that also acted would
  * make the button decorative and every stray click consequential.
  */
-export function PullRequestRow({ entry, projectId, ci, now, poll, onAct }: PullRequestRowProps) {
+export function PullRequestRow({ entry, projectId, now, poll, onAct }: PullRequestRowProps) {
   const { pullRequest } = entry;
-  const { data: facts } = usePullRequestFacts(
+  // Asked only when the list did not already answer it — which on GitHub is never, because its list
+  // query carries the counts and the verdict as free scalars on nodes it has already paid for.
+  // Elsewhere this fires once, the first time a pull request is seen, and is then held: the key
+  // holds `updated_at` as well as the head sha, so a push, a rename, a merge or a CI transition all
+  // ask a new question and nothing else does.
+  const { data: fetched } = usePullRequestRowDetail(
     projectId,
     pullRequest.number,
     pullRequest.head_sha,
-    poll,
+    pullRequest.updated_at,
+    poll && pullRequest.detail == null,
   );
+  const detail = pullRequest.detail ?? fetched;
 
   const age = relativeAge(pullRequest.created_at, now);
+  const ci = rollupOfCi(detail?.ci);
   const CiIcon = CI_ICON[ci];
-  const { label, hint, icon: ActionIcon } = action(entry);
+  const { label, hint, icon: ActionIcon, disabled: actionDisabled } = action(entry);
 
-  const additions = facts?.additions ?? 0;
-  const deletions = facts?.deletions ?? 0;
+  const additions = detail?.additions ?? 0;
+  const deletions = detail?.deletions ?? 0;
 
   // Separated by the same middot at the same opacity `WorktreeMetrics` uses two columns away: this
   // reads as one list of facts about the pull request, as that one does about a worktree. Absent
@@ -106,10 +129,10 @@ export function PullRequestRow({ entry, projectId, ci, now, poll, onAct }: PullR
         {deletions > 0 && <span className="text-destructive">−{deletions}</span>}
       </span>
     ) : null,
-    facts?.changed_files != null ? (
+    detail?.changed_files != null ? (
       <span key="files" className="flex items-center gap-1 tabular-nums text-muted-foreground">
         <FileDiff className="size-3" />
-        {facts.changed_files} {facts.changed_files === 1 ? "file" : "files"}
+        {detail.changed_files} {detail.changed_files === 1 ? "file" : "files"}
       </span>
     ) : null,
     // Only the icon carries the verdict's colour, and the word stays "CI" rather than "passed":
@@ -181,11 +204,22 @@ export function PullRequestRow({ entry, projectId, ci, now, poll, onAct }: PullR
               // for something that repeats on every card. The colour is the whole signal.
               // `hover:text-accent` is not redundant: the ghost variant would otherwise drain the
               // accent back to `foreground` exactly when the cursor is on it.
+              // `aria-disabled` rather than `disabled`: a disabled button receives no pointer
+              // events, so the tooltip explaining *why* it cannot be pressed would never open —
+              // and on this row that explanation is the entire content of the answer.
               <Button
                 variant="ghost"
                 size="xs"
-                className="h-6 shrink-0 gap-1 border border-accent px-2 text-[11px] text-accent hover:bg-accent/10 hover:text-accent"
-                onClick={() => onAct(entry)}
+                aria-disabled={actionDisabled}
+                className={cn(
+                  "h-6 shrink-0 gap-1 border px-2 text-[11px]",
+                  actionDisabled
+                    ? "cursor-default border-border text-muted-foreground opacity-60"
+                    : "border-accent text-accent hover:bg-accent/10 hover:text-accent",
+                )}
+                onClick={() => {
+                  if (!actionDisabled) onAct(entry);
+                }}
               />
             }
           >

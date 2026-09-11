@@ -9,9 +9,12 @@
 
 use serde::Deserialize;
 
-use super::{CreatedPullRequest, PullRequestDetails, PullRequestState, PullRequestTarget};
-use crate::integration::azure_devops::{AZDO_API_VERSION, make_azdo_auth, normalize_azdo_org_url};
-use crate::integration::build_http_client;
+use super::{
+    cursor_offset, next_offset_cursor, CreatedPullRequest, FoundPullRequest, ListedPullRequest,
+    PullRequestDetail, PullRequestPage, PullRequestState, PullRequestTarget, LIST_PAGE_SIZE,
+};
+use crate::integration::azure_devops::{make_azdo_auth, normalize_azdo_org_url, AZDO_API_VERSION};
+use crate::integration::http_client;
 
 /// Which shape of Azure DevOps URL a remote is. The host decides, never the credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,9 +49,9 @@ fn azure_devops_flavour(host: &str) -> AzureDevOpsFlavour {
         "dev.azure.com" | "ssh.dev.azure.com" => AzureDevOpsFlavour::Cloud,
         "vs-ssh.visualstudio.com" => AzureDevOpsFlavour::LegacyCloudSsh,
         _ => match host.strip_suffix(".visualstudio.com") {
-            Some(organization) if !organization.is_empty() => {
-                AzureDevOpsFlavour::LegacyCloud { organization: organization.to_string() }
-            }
+            Some(organization) if !organization.is_empty() => AzureDevOpsFlavour::LegacyCloud {
+                organization: organization.to_string(),
+            },
             _ => AzureDevOpsFlavour::Server,
         },
     }
@@ -81,7 +84,10 @@ fn azure_devops_coordinates(
     let segments: Vec<&str> = project_path.split('/').filter(|s| !s.is_empty()).collect();
 
     let unreadable = || {
-        format!("Could not work out the Azure DevOps project and repository from the remote path `{}`.", project_path)
+        format!(
+            "Could not work out the Azure DevOps project and repository from the remote path `{}`.",
+            project_path
+        )
     };
 
     // `_git` appears in HTTPS remotes only. Everything before the project is organization or
@@ -90,7 +96,10 @@ fn azure_devops_coordinates(
     {
         Some(marker) => {
             let repository = segments.get(marker + 1).ok_or_else(unreadable)?;
-            let project = marker.checked_sub(1).and_then(|i| segments.get(i)).ok_or_else(unreadable)?;
+            let project = marker
+                .checked_sub(1)
+                .and_then(|i| segments.get(i))
+                .ok_or_else(unreadable)?;
             (&segments[..marker.saturating_sub(1)], *project, *repository)
         }
         None => {
@@ -111,9 +120,15 @@ fn azure_devops_coordinates(
     let (base, organization) = match &flavour {
         AzureDevOpsFlavour::Cloud => {
             let organization = prefix.last().ok_or_else(|| {
-                format!("The Azure DevOps remote path `{}` names no organization.", project_path)
+                format!(
+                    "The Azure DevOps remote path `{}` names no organization.",
+                    project_path
+                )
             })?;
-            (format!("https://dev.azure.com/{}", organization), Some((*organization).to_string()))
+            (
+                format!("https://dev.azure.com/{}", organization),
+                Some((*organization).to_string()),
+            )
         }
         AzureDevOpsFlavour::LegacyCloud { organization } => (
             format!("https://{}.visualstudio.com", organization),
@@ -121,7 +136,10 @@ fn azure_devops_coordinates(
         ),
         AzureDevOpsFlavour::LegacyCloudSsh => {
             let organization = prefix.last().ok_or_else(|| {
-                format!("The Azure DevOps remote path `{}` names no organization.", project_path)
+                format!(
+                    "The Azure DevOps remote path `{}` names no organization.",
+                    project_path
+                )
             })?;
             (
                 format!("https://{}.visualstudio.com", organization),
@@ -155,7 +173,9 @@ fn azure_devops_coordinates(
 /// `None` for a path this cannot read, and for an on-premises remote — where the base comes from
 /// the credential in the first place, so there is nothing to prefer it by.
 pub(super) fn preferred_base(host: &str, project_path: &str) -> Option<String> {
-    azure_devops_coordinates(host, project_path, None).ok().map(|coordinates| coordinates.base)
+    azure_devops_coordinates(host, project_path, None)
+        .ok()
+        .map(|coordinates| coordinates.base)
 }
 
 /// Refuse a credential that answered for a different organization or a different server.
@@ -264,17 +284,18 @@ fn azure_devops_mergeable(merge_status: Option<&str>) -> Option<bool> {
 /// `head_sha` is the source head as of the last merge *attempt*, not necessarily the live branch
 /// tip — Azure DevOps recomputes it asynchronously. Harmless while CI is unanswered for this
 /// provider; a future CI implementation that trusts it would query a commit one rebase behind.
-fn azure_devops_details(pr: AzureDevOpsPullRequestState) -> PullRequestDetails {
+fn azure_devops_details(pr: AzureDevOpsPullRequestState) -> PullRequestDetail {
     // The only diagnosis that will ever exist for `failure` and `rejectedByPolicy`, both of which
     // this maps to `None` and therefore acts on nowhere else.
     if let Some(message) = &pr.merge_failure_message {
         log::debug!("Azure DevOps declined to merge pull request: {}", message);
     }
-    PullRequestDetails {
-        state: azure_devops_state(&pr.status),
-        mergeable: azure_devops_mergeable(pr.merge_status.as_deref()),
-        head_sha: pr.last_merge_source_commit.and_then(|commit| commit.commit_id),
-    }
+    PullRequestDetail::from_state(
+        azure_devops_state(&pr.status),
+        azure_devops_mergeable(pr.merge_status.as_deref()),
+        pr.last_merge_source_commit
+            .and_then(|commit| commit.commit_id),
+    )
 }
 
 /// Catch the sign-in page Azure DevOps serves instead of an authentication error.
@@ -312,12 +333,7 @@ struct AzureDevOpsCreatedPullRequest {
     pull_request_id: i64,
 }
 
-fn azure_devops_create_body(
-    title: &str,
-    body: &str,
-    head: &str,
-    base: &str,
-) -> serde_json::Value {
+fn azure_devops_create_body(title: &str, body: &str, head: &str, base: &str) -> serde_json::Value {
     serde_json::json!({
         "title": title,
         "description": body,
@@ -364,13 +380,10 @@ async fn azure_devops_repository_id(
     coordinates: &AzureDevOpsCoordinates,
     token: &str,
 ) -> Result<String, String> {
-    let response = build_http_client()?
+    let response = http_client()?
         .get(format!(
             "{}/{}/_apis/git/repositories/{}?api-version={}",
-            coordinates.base,
-            coordinates.project,
-            coordinates.repository,
-            AZDO_API_VERSION
+            coordinates.base, coordinates.project, coordinates.repository, AZDO_API_VERSION
         ))
         .header("Authorization", make_azdo_auth(token))
         .send()
@@ -381,6 +394,210 @@ async fn azure_devops_repository_id(
     Ok(repository.id)
 }
 
+#[derive(Deserialize)]
+struct AzureDevOpsListEntry {
+    #[serde(rename = "pullRequestId")]
+    pull_request_id: i64,
+    #[serde(default)]
+    title: String,
+    /// `active`, `completed` or `abandoned`. Read only by [`find_azure_devops`], which asks for
+    /// every status and prefers the active one; [`list_azure_devops`] filters to `active`.
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(rename = "sourceRefName", default)]
+    source_ref_name: Option<String>,
+    #[serde(rename = "targetRefName", default)]
+    target_ref_name: Option<String>,
+    #[serde(rename = "creationDate", default)]
+    creation_date: Option<String>,
+    #[serde(rename = "lastMergeSourceCommit", default)]
+    last_merge_source_commit: Option<AzureDevOpsCommitRef>,
+    /// Set only on a pull request whose source branch is in a fork, so its *presence* is the
+    /// signal and its contents are never read.
+    #[serde(rename = "forkSource", default)]
+    fork_source: Option<AzureDevOpsForkSource>,
+    /// The repository the pull request belongs to — which is the target — and the source's own,
+    /// when Azure names it separately. A second signal for the same question, because unlike every
+    /// other forge here a `true` costs the user the action entirely: nothing can check out an
+    /// Azure fork pull request (see `pull_request_head_ref`), so the row is refused rather than
+    /// checked out differently. Both signals therefore only ever *add* fork-ness when positively
+    /// observed; neither absence is read as "unknown".
+    #[serde(default)]
+    repository: Option<AzureDevOpsRepositoryRef>,
+    #[serde(rename = "sourceRepository", default)]
+    source_repository: Option<AzureDevOpsRepositoryRef>,
+}
+
+/// Deliberately empty: only whether Azure sent the object at all is meaningful.
+#[derive(Deserialize)]
+struct AzureDevOpsForkSource {}
+
+#[derive(Deserialize)]
+struct AzureDevOpsRepositoryRef {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AzureDevOpsListPage {
+    #[serde(default)]
+    value: Vec<AzureDevOpsListEntry>,
+}
+
+/// Azure DevOps names branches by full ref where a worktree row carries the bare name.
+fn strip_refs_heads(name: String) -> String {
+    name.strip_prefix("refs/heads/")
+        .map(str::to_string)
+        .unwrap_or(name)
+}
+
+/// `None` for an entry with no source ref: that is the field a worktree is matched on.
+///
+/// `head_sha` is the source head as of the last merge *attempt* rather than the live branch tip —
+/// see [`azure_devops_details`]. Harmless while this provider answers no CI, but a future CI
+/// implementation keyed on it would ask about a commit one rebase behind.
+fn list_entry_to_listed(
+    entry: AzureDevOpsListEntry,
+    coordinates: &AzureDevOpsCoordinates,
+) -> Option<ListedPullRequest> {
+    Some(ListedPullRequest {
+        number: entry.pull_request_id,
+        // The response's own `url` is the REST resource, not a page a user can open.
+        url: azure_devops_web_url(coordinates, entry.pull_request_id),
+        title: entry.title,
+        head_branch: strip_refs_heads(entry.source_ref_name?),
+        base_branch: entry.target_ref_name.map(strip_refs_heads),
+        created_at: entry.creation_date,
+        head_sha: entry
+            .last_merge_source_commit
+            .and_then(|commit| commit.commit_id),
+        // Azure DevOps has no "last updated" on a pull request — `creationDate` and `closedDate`
+        // are the only timestamps the resource carries — so a row here is invalidated by its head
+        // commit moving and by nothing else.
+        updated_at: None,
+        from_fork: entry.fork_source.is_some()
+            || match (entry.source_repository, entry.repository) {
+                (Some(source), Some(target)) => match (source.id, target.id) {
+                    (Some(source), Some(target)) => source != target,
+                    _ => false,
+                },
+                _ => false,
+            },
+        // Filled in by `list_open_pull_requests` rather than here: this forge reports neither diff
+        // counts nor checks, so the answer is "asked, and there is nothing", not "unasked".
+        detail: None,
+    })
+}
+
+/// One page of the repository's active pull requests.
+///
+/// Addressed by repository *name* rather than the id [`create_azure_devops`] resolves first: this
+/// endpoint accepts either, and the name is already in the remote path — so a page costs one
+/// request where creating one costs two.
+///
+/// No search argument: `searchCriteria` filters by status, branch, creator and reviewer and has no
+/// text field at all, which is why `searches_pull_requests` is false for this provider and the
+/// panel shows no search box on it.
+pub(super) async fn list_azure_devops(
+    target: &PullRequestTarget<'_>,
+    cursor: Option<&str>,
+) -> Result<PullRequestPage, String> {
+    let coordinates = azure_devops_coordinates(
+        &target.config.host,
+        &target.config.project_path,
+        target.instance_url,
+    )?;
+    credential_matches_coordinates(&coordinates, target.instance_url)?;
+    let offset = cursor_offset(cursor);
+
+    let response = http_client()?
+        .get(format!(
+            "{}/{}/_apis/git/repositories/{}/pullrequests\
+             ?searchCriteria.status=active&$top={}&$skip={}&api-version={}",
+            coordinates.base,
+            coordinates.project,
+            coordinates.repository,
+            LIST_PAGE_SIZE,
+            offset,
+            AZDO_API_VERSION
+        ))
+        .header("Authorization", make_azdo_auth(target.token))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+
+    let page: AzureDevOpsListPage = azure_devops_json(response).await?;
+    let returned = page.value.len();
+    Ok(PullRequestPage {
+        items: page
+            .value
+            .into_iter()
+            .filter_map(|entry| list_entry_to_listed(entry, &coordinates))
+            .collect(),
+        next_cursor: next_offset_cursor(returned, offset),
+        // The response carries a `count`, but it counts this page rather than the collection, and
+        // there is no total anywhere in the resource.
+        total: None,
+    })
+}
+
+/// How far back a branch's own pull requests are scanned. A branch reused across several is rare.
+const BRANCH_SCAN_LIMIT: usize = 20;
+
+/// The pull request on one branch.
+///
+/// Azure DevOps filters by source ref server-side, so this is one request whatever the project's
+/// size. `status=all` rather than `active`, because a session opened on a branch whose pull request
+/// already merged should say so rather than show nothing.
+pub(super) async fn find_azure_devops(
+    target: &PullRequestTarget<'_>,
+    branch: &str,
+) -> Result<Option<FoundPullRequest>, String> {
+    let coordinates = azure_devops_coordinates(
+        &target.config.host,
+        &target.config.project_path,
+        target.instance_url,
+    )?;
+    credential_matches_coordinates(&coordinates, target.instance_url)?;
+
+    let response = http_client()?
+        .get(format!(
+            "{}/{}/_apis/git/repositories/{}/pullrequests\
+             ?searchCriteria.sourceRefName=refs/heads/{}&searchCriteria.status=all\
+             &$top={}&api-version={}",
+            coordinates.base,
+            coordinates.project,
+            coordinates.repository,
+            urlencoding::encode(branch),
+            BRANCH_SCAN_LIMIT,
+            AZDO_API_VERSION
+        ))
+        .header("Authorization", make_azdo_auth(target.token))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+
+    let page: AzureDevOpsListPage = azure_devops_json(response).await?;
+    Ok(pick_azure_devops(page.value).map(|entry| FoundPullRequest {
+        number: entry.pull_request_id,
+        // The response's own `url` is the REST resource, not a page a user can open.
+        url: azure_devops_web_url(&coordinates, entry.pull_request_id),
+    }))
+}
+
+/// An active pull request wins over a completed or abandoned one whatever order Azure returned them
+/// in — the card is about what is happening now, not what landed last month.
+fn pick_azure_devops(mut entries: Vec<AzureDevOpsListEntry>) -> Option<AzureDevOpsListEntry> {
+    if entries.is_empty() {
+        return None;
+    }
+    let index = entries
+        .iter()
+        .position(|entry| entry.status.as_deref() == Some("active"))
+        .unwrap_or(0);
+    Some(entries.swap_remove(index))
+}
+
 pub(super) async fn create_azure_devops(
     target: &PullRequestTarget<'_>,
     head: &str,
@@ -388,19 +605,19 @@ pub(super) async fn create_azure_devops(
     title: &str,
     body: &str,
 ) -> Result<CreatedPullRequest, String> {
-    let coordinates =
-        azure_devops_coordinates(&target.config.host, &target.config.project_path, target.instance_url)?;
+    let coordinates = azure_devops_coordinates(
+        &target.config.host,
+        &target.config.project_path,
+        target.instance_url,
+    )?;
     credential_matches_coordinates(&coordinates, target.instance_url)?;
 
     let repository_id = azure_devops_repository_id(&coordinates, target.token).await?;
 
-    let response = build_http_client()?
+    let response = http_client()?
         .post(format!(
             "{}/{}/_apis/git/repositories/{}/pullrequests?api-version={}",
-            coordinates.base,
-            coordinates.project,
-            repository_id,
-            AZDO_API_VERSION
+            coordinates.base, coordinates.project, repository_id, AZDO_API_VERSION
         ))
         .header("Authorization", make_azdo_auth(target.token))
         .json(&azure_devops_create_body(title, body, head, base))
@@ -412,13 +629,14 @@ pub(super) async fn create_azure_devops(
     Ok(CreatedPullRequest {
         number: created.pull_request_id,
         url: azure_devops_web_url(&coordinates, created.pull_request_id),
+        head_sha: None,
     })
 }
 
 pub(super) async fn fetch_azure_devops(
     target: &PullRequestTarget<'_>,
     number: i64,
-) -> Result<PullRequestDetails, String> {
+) -> Result<PullRequestDetail, String> {
     let coordinates = azure_devops_coordinates(
         &target.config.host,
         &target.config.project_path,
@@ -428,12 +646,10 @@ pub(super) async fn fetch_azure_devops(
 
     // A pull request id is unique per organization, so this needs no repository — which is
     // exactly why the credential has to have been checked against the organization first.
-    let response = build_http_client()?
+    let response = http_client()?
         .get(format!(
             "{}/_apis/git/pullrequests/{}?api-version={}",
-            coordinates.base,
-            number,
-            AZDO_API_VERSION
+            coordinates.base, number, AZDO_API_VERSION
         ))
         .header("Authorization", make_azdo_auth(target.token))
         .send()
@@ -450,6 +666,130 @@ mod tests {
 
     fn coordinates(host: &str, project_path: &str) -> AzureDevOpsCoordinates {
         azure_devops_coordinates(host, project_path, None).expect("path should parse")
+    }
+
+    /// The branch lookup asks for every status, so a branch reused after a merge answers with both.
+    /// Reading `status` wrong — a serde rename typo, say — would silently make every entry look
+    /// inactive and hand back whichever Azure happened to list first, which is the merged one.
+    #[test]
+    fn a_branch_with_a_merged_and_an_active_pull_request_picks_the_active_one() {
+        let page: AzureDevOpsListPage = serde_json::from_str(
+            r#"{"value":[
+                 {"pullRequestId":161,"title":"First attempt","status":"completed",
+                  "sourceRefName":"refs/heads/feature"},
+                 {"pullRequestId":164,"title":"Second attempt","status":"active",
+                  "sourceRefName":"refs/heads/feature"}
+               ]}"#,
+        )
+        .expect("body should parse");
+
+        assert_eq!(
+            pick_azure_devops(page.value).map(|entry| entry.pull_request_id),
+            Some(164)
+        );
+    }
+
+    /// With nothing active, the most recent is better than nothing — "merged last week" is still
+    /// the answer to what happened on this branch.
+    #[test]
+    fn a_branch_whose_pull_requests_have_all_landed_still_answers() {
+        let page: AzureDevOpsListPage = serde_json::from_str(
+            r#"{"value":[{"pullRequestId":161,"title":"Done","status":"completed"}]}"#,
+        )
+        .expect("body should parse");
+
+        assert_eq!(
+            pick_azure_devops(page.value).map(|entry| entry.pull_request_id),
+            Some(161)
+        );
+    }
+
+    /// A branch with no pull request is `None`, not an error — the card is simply absent, and an
+    /// error here would be a toast every thirty seconds on every branch that never gets one.
+    #[test]
+    fn a_branch_with_no_pull_request_is_not_an_error() {
+        assert!(pick_azure_devops(Vec::new()).is_none());
+    }
+
+    fn azdo_listed(body: &str) -> Vec<ListedPullRequest> {
+        let page: AzureDevOpsListPage = serde_json::from_str(body).expect("body should parse");
+        let coordinates = coordinates("dev.azure.com", "fabrikam/MyProject/_git/MyRepo");
+        page.value
+            .into_iter()
+            .filter_map(|e| list_entry_to_listed(e, &coordinates))
+            .collect()
+    }
+
+    /// Azure is the one forge here whose fork rows cannot be checked out at all — it publishes no
+    /// head ref, only the merge commit — so a `from_fork` reported wrongly in either direction is
+    /// visible: `true` withdraws the row's action, `false` sends it at a branch that is not there.
+    ///
+    /// Both signals are therefore read as evidence *for* a fork and never against one, which is
+    /// why an entry naming neither reads as same-repository. That is the opposite default from
+    /// every other provider, and deliberate.
+    #[test]
+    fn a_fork_pull_request_is_recognised_by_either_signal() {
+        let from_fork = |fields: &str| {
+            let body = format!(
+                r#"{{"count":1,"value":[{{"pullRequestId":1,"title":"T","status":"active",
+                     "sourceRefName":"refs/heads/patch-1",
+                     "targetRefName":"refs/heads/main"{}}}]}}"#,
+                fields
+            );
+            azdo_listed(&body).pop().expect("one row").from_fork
+        };
+
+        assert!(
+            !from_fork(""),
+            "nothing said, and nothing can be checked out either way"
+        );
+        assert!(from_fork(r#","forkSource":{"name":"refs/heads/patch-1"}"#));
+        assert!(from_fork(
+            r#","sourceRepository":{"id":"aaa"},"repository":{"id":"bbb"}"#
+        ));
+        assert!(!from_fork(
+            r#","sourceRepository":{"id":"aaa"},"repository":{"id":"aaa"}"#
+        ));
+    }
+
+    /// Azure DevOps names branches by full ref, where a worktree row carries the bare name.
+    /// Matching `refs/heads/feature` against `feature` finds nothing, silently.
+    #[test]
+    fn an_entry_maps_onto_the_shared_shape_with_the_refs_prefix_stripped() {
+        let listed = azdo_listed(
+            r#"{"count":1,"value":[{"pullRequestId":22,"title":"A new feature","status":"active",
+                 "creationDate":"2026-09-01T16:30:31.6655471Z",
+                 "sourceRefName":"refs/heads/npaulk/my_work",
+                 "targetRefName":"refs/heads/new_feature",
+                 "lastMergeSourceCommit":{"commitId":"b60280bc6e62e2f880f1b63c1e24987664d3bda3"}}]}"#,
+        );
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].number, 22);
+        assert_eq!(listed[0].head_branch, "npaulk/my_work");
+        assert_eq!(listed[0].base_branch.as_deref(), Some("new_feature"));
+        assert_eq!(
+            listed[0].head_sha.as_deref(),
+            Some("b60280bc6e62e2f880f1b63c1e24987664d3bda3")
+        );
+        // The response's own `url` is the REST resource, so the browser link is built here.
+        assert_eq!(
+            listed[0].url,
+            "https://dev.azure.com/fabrikam/MyProject/_git/MyRepo/pullrequest/22"
+        );
+    }
+
+    /// A branch name that genuinely has no `refs/heads/` prefix must survive untouched rather than
+    /// losing its first eleven characters.
+    #[test]
+    fn a_bare_branch_name_is_left_alone() {
+        assert_eq!(strip_refs_heads("refs/heads/main".to_string()), "main");
+        assert_eq!(strip_refs_heads("main".to_string()), "main");
+        assert_eq!(strip_refs_heads("refs/tags/v1".to_string()), "refs/tags/v1");
+    }
+
+    #[test]
+    fn an_entry_with_no_source_ref_is_dropped() {
+        assert!(azdo_listed(r#"{"value":[{"pullRequestId":1,"title":"x"}]}"#).is_empty());
     }
 
     /// Four remote shapes, no two of which agree on where the organization is, and no segment count
@@ -500,7 +840,10 @@ mod tests {
             Some("https://tfs.corp.example/tfs/DefaultCollection"),
         )
         .expect("path should parse");
-        assert_eq!(on_prem.base, "https://tfs.corp.example/tfs/DefaultCollection");
+        assert_eq!(
+            on_prem.base,
+            "https://tfs.corp.example/tfs/DefaultCollection"
+        );
         assert_eq!(on_prem.organization, None);
         assert_eq!(on_prem.project, "MyProject");
         assert_eq!(on_prem.repository, "MyRepo");
@@ -551,7 +894,10 @@ mod tests {
 
         let wrong = credential_matches_coordinates(&ours, Some("https://dev.azure.com/otherorg"))
             .expect_err("another organization must be refused");
-        assert!(wrong.contains("myorg"), "the message has to name the organization needed");
+        assert!(
+            wrong.contains("myorg"),
+            "the message has to name the organization needed"
+        );
 
         assert!(credential_matches_coordinates(&ours, None).is_err());
 
@@ -588,7 +934,10 @@ mod tests {
     #[test]
     fn azure_devops_returns_no_browser_url_so_we_build_one() {
         assert_eq!(
-            azure_devops_web_url(&coordinates("dev.azure.com", "myorg/MyProject/_git/MyRepo"), 22),
+            azure_devops_web_url(
+                &coordinates("dev.azure.com", "myorg/MyProject/_git/MyRepo"),
+                22
+            ),
             "https://dev.azure.com/myorg/MyProject/_git/MyRepo/pullrequest/22"
         );
         assert_eq!(
@@ -611,7 +960,7 @@ mod tests {
         );
     }
 
-    fn azdo_details(body: &str) -> PullRequestDetails {
+    fn azdo_details(body: &str) -> PullRequestDetail {
         azure_devops_details(serde_json::from_str(body).expect("body should parse"))
     }
 
@@ -641,8 +990,19 @@ mod tests {
         assert_eq!(azure_devops_mergeable(Some("succeeded")), Some(true));
         assert_eq!(azure_devops_mergeable(Some("CONFLICTS")), Some(false));
 
-        for status in ["queued", "notSet", "rejectedByPolicy", "failure", "something-new"] {
-            assert_eq!(azure_devops_mergeable(Some(status)), None, "{} is not an answer", status);
+        for status in [
+            "queued",
+            "notSet",
+            "rejectedByPolicy",
+            "failure",
+            "something-new",
+        ] {
+            assert_eq!(
+                azure_devops_mergeable(Some(status)),
+                None,
+                "{} is not an answer",
+                status
+            );
         }
         assert_eq!(azure_devops_mergeable(None), None);
     }
@@ -655,7 +1015,10 @@ mod tests {
         let details = azdo_details(
             r#"{"status":"active","mergeStatus":"succeeded","lastMergeSourceCommit":{"commitId":"b60280bc6e62e2f880f1b63c1e24987664d3bda3"}}"#,
         );
-        assert_eq!(details.head_sha.as_deref(), Some("b60280bc6e62e2f880f1b63c1e24987664d3bda3"));
+        assert_eq!(
+            details.head_sha.as_deref(),
+            Some("b60280bc6e62e2f880f1b63c1e24987664d3bda3")
+        );
         assert_eq!(details.state, PullRequestState::Open);
         assert_eq!(details.mergeable, Some(true));
 
@@ -668,8 +1031,7 @@ mod tests {
     /// meets only after their branch has already been pushed to the remote.
     #[test]
     fn azure_devops_wants_the_branch_spelled_as_a_ref() {
-        let body =
-            azure_devops_create_body("Add the thing", "Because.", "maestro/task-12", "main");
+        let body = azure_devops_create_body("Add the thing", "Because.", "maestro/task-12", "main");
 
         assert_eq!(body["sourceRefName"], "refs/heads/maestro/task-12");
         assert_eq!(body["targetRefName"], "refs/heads/main");
@@ -687,7 +1049,10 @@ mod tests {
             "<!DOCTYPE html><html>Sign in</html>",
         )
         .expect("a 203 is the documented shape of this failure");
-        assert!(sign_in.contains("Code (Read & Write)"), "the message must name the scope");
+        assert!(
+            sign_in.contains("Code (Read & Write)"),
+            "the message must name the scope"
+        );
 
         assert!(
             azure_devops_scope_error(reqwest::StatusCode::OK, "  <html>Sign in</html>").is_some(),

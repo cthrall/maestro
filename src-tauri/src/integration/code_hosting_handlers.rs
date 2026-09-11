@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::State;
 
-use crate::core::AppState;
 use crate::core::connection::get_project_with_git_conn;
 use crate::core::project_storage::read_maestro_json;
+use crate::core::AppState;
 use crate::git::remote::{
-    pick_remote, parse_remote_url, redact_remote_url, url_for_remote, ParsedRemote,
+    parse_remote_url, pick_remote, redact_remote_url, url_for_remote, ParsedRemote,
 };
 use crate::git::run_git_in_dir_lossy;
 use crate::integration::issue_tracking_handlers::{find_integration, provider_for_host};
@@ -60,13 +60,44 @@ pub struct CodeHostingStatus {
     /// "connect it in Settings" is the right prompt for an unconnected GitHub and a misleading one
     /// for a forge Maestro could not post to either way. `false` whenever the forge is unidentified.
     pub forge_supports_pull_requests: bool,
-    /// Whether this forge can be asked which pull request a branch belongs to.
+    /// Whether this forge can be asked for its open pull requests.
     ///
-    /// Separate from `forge_supports_pull_requests` because the two are genuinely different sets:
-    /// Bitbucket and Azure DevOps can have a pull request opened on them but cannot yet be searched
-    /// by head branch. The session panel polls only when this is true, so that an unsupported forge
-    /// costs no requests rather than one failing request every thirty seconds.
-    pub forge_supports_branch_lookup: bool,
+    /// What the Worktrees view rests on: every worktree card finds its pull request in that list.
+    /// Separate from `forge_supports_pull_requests` because the two are different questions —
+    /// opening one and enumerating them are different endpoints, and a forge could gain either
+    /// first. The view polls only when this is true, so a forge without a lister costs no requests
+    /// rather than one failing request per cycle.
+    pub forge_supports_pull_request_list: bool,
+    /// Whether a pull request opened *from a fork* can be put into a worktree on this forge.
+    ///
+    /// Its head branch lives in a repository the project has no remote for, so the only way to it
+    /// is the ref the forge mirrors into the base repository — and Azure DevOps publishes no such
+    /// ref, only the merge commit it would produce. Read by the panel so a fork's row on that forge
+    /// is offered disabled with a reason, rather than a button that fails once pressed.
+    /// Same-repository pull requests need none of this and are unaffected.
+    pub forge_checks_out_fork_pull_requests: bool,
+    /// Whether this forge can be asked for the pull request on one branch.
+    ///
+    /// What the *session* card rests on, and deliberately not the list above. That list is one page
+    /// of a project which may have thousands of open pull requests, so a branch missing from it is
+    /// indistinguishable from a branch that has none — which is a card silently disappearing on a
+    /// busy repository.
+    pub forge_finds_pull_request_by_branch: bool,
+    /// Whether the panel should show a search box.
+    ///
+    /// Half the forges cannot search pull requests at all: Gitea and Forgejo take no `q` on their
+    /// pull request list and search only through an issues endpoint that names no head branch, and
+    /// Azure DevOps has no text criterion. The box is hidden rather than degraded to filtering the
+    /// visible page, which would make one control mean the project on three providers and thirty
+    /// rows on the other three.
+    pub forge_searches_pull_requests: bool,
+    /// Whether this forge will name its individual checks.
+    ///
+    /// Weaker than "has CI": Bitbucket reports a verdict Maestro can read without enumerating
+    /// anything, and Gitea's commit-status shape has moved between versions. The card's rollup
+    /// needs names, so it polls only when this is true — without it the checks query asks every ten
+    /// seconds for a list that is empty by construction and can never become anything else.
+    pub forge_enumerates_checks: bool,
     /// Whether this call wrote `code_hosting` into `.maestro/settings.json`.
     pub applied: bool,
 }
@@ -95,7 +126,11 @@ pub async fn save_project_code_hosting_config(
     mutate_project_config(&conn, |config| {
         // Clearing is an explicit "not here", so it also opts out of detection — otherwise the
         // next status call would put it straight back.
-        config.code_hosting_auto_detect = if code_hosting.is_none() { Some(false) } else { None };
+        config.code_hosting_auto_detect = if code_hosting.is_none() {
+            Some(false)
+        } else {
+            None
+        };
         config.code_hosting = code_hosting;
         true
     })
@@ -178,7 +213,11 @@ pub async fn code_hosting_status(
         remote_url: None,
         config: None,
         forge_supports_pull_requests: false,
-        forge_supports_branch_lookup: false,
+        forge_supports_pull_request_list: false,
+        forge_checks_out_fork_pull_requests: false,
+        forge_finds_pull_request_by_branch: false,
+        forge_searches_pull_requests: false,
+        forge_enumerates_checks: false,
         applied: false,
     };
 
@@ -221,7 +260,11 @@ pub async fn code_hosting_status(
             remote_url: Some(remote_url),
             config: None,
             forge_supports_pull_requests: false,
-            forge_supports_branch_lookup: false,
+            forge_supports_pull_request_list: false,
+            forge_checks_out_fork_pull_requests: false,
+            forge_finds_pull_request_by_branch: false,
+            forge_searches_pull_requests: false,
+            forge_enumerates_checks: false,
             applied: false,
         });
     };
@@ -249,18 +292,32 @@ pub async fn code_hosting_status(
     // `None` rather than the project's base: this only asks whether anything is connected, and
     // reporting `NotConnected` for a project whose credential the approve path would go on to find
     // would hide the pull request option over a question that was never asked here.
-    let connected = find_integration(&provider, &remote.host, None, app_state).await.is_some();
+    let connected = find_integration(&provider, &remote.host, None, app_state)
+        .await
+        .is_some();
 
     Ok(CodeHostingStatus {
-        rung: if connected { CodeHostingRung::Ready } else { CodeHostingRung::NotConnected },
+        rung: if connected {
+            CodeHostingRung::Ready
+        } else {
+            CodeHostingRung::NotConnected
+        },
         landing_mode,
         remote: Some(remote_name),
         remote_url: Some(remote_url),
         forge_supports_pull_requests: crate::integration::pull_request::supports_pull_requests(
             &config,
         ),
-        forge_supports_branch_lookup:
-            crate::integration::pull_request::supports_branch_lookup(&config),
+        forge_supports_pull_request_list:
+            crate::integration::pull_request::supports_pull_request_list(&config),
+        forge_checks_out_fork_pull_requests:
+            crate::integration::pull_request::checks_out_fork_pull_requests(&config),
+        forge_finds_pull_request_by_branch:
+            crate::integration::pull_request::finds_pull_request_by_branch(&config),
+        forge_searches_pull_requests: crate::integration::pull_request::searches_pull_requests(
+            &config,
+        ),
+        forge_enumerates_checks: crate::integration::pull_request::enumerates_checks(&config),
         config: Some(config),
         applied,
     })
@@ -271,7 +328,10 @@ mod tests {
     use super::*;
 
     fn remote(host: &str, path: &str) -> ParsedRemote {
-        ParsedRemote { host: host.to_string(), path: path.to_string() }
+        ParsedRemote {
+            host: host.to_string(),
+            path: path.to_string(),
+        }
     }
 
     #[test]

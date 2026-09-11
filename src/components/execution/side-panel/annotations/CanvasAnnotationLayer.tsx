@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SquareDashedMousePointer } from "lucide-react";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { Button } from "@/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/ui/tooltip";
 import { PendingCommentBlock } from "@/components/execution/diff/PendingCommentBlock";
@@ -512,7 +512,7 @@ export function CanvasAnnotationLayer({
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto custom-scrollbar p-3">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-3">
         <div ref={frameRef} className="relative">
           {/* The capture target. The overlay below is deliberately a sibling: anything inside this
               element — the marquee, the outlines, the bubble — would be rasterised into the shot. */}

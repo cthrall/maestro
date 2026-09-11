@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { MessageSquarePlus } from "lucide-react";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { PendingCommentBlock } from "@/components/execution/diff/PendingCommentBlock";
 import { useAnnotationStore, useSessionAnnotations } from "@/store/annotationStore";
 import type { Annotation } from "@/store/annotationStore";
@@ -23,6 +23,8 @@ interface PlanAnnotationLayerProps {
   sessionKey: number;
   onSend: (annotations: Annotation[]) => void;
   sendDisabled?: boolean;
+  /** Overrides the send button's wording — see `AnnotationBar`. */
+  sendLabel?: string;
   /** Classes for the scrolling content area — padding and type styles of the host pane. */
   scrollClassName?: string;
   className?: string;
@@ -40,6 +42,7 @@ export function PlanAnnotationLayer({
   sessionKey,
   onSend,
   sendDisabled,
+  sendLabel,
   scrollClassName = "px-4 py-4 text-sm",
   className,
   children,
@@ -282,16 +285,14 @@ export function PlanAnnotationLayer({
             kind="plan"
             onSend={onSend}
             sendDisabled={sendDisabled}
+            sendLabel={sendLabel}
             onGoTo={goTo}
             activeId={viewingId}
           />
         )}
       </div>
 
-      <div
-        ref={scrollRef}
-        className={cn("flex-1 overflow-y-auto custom-scrollbar", scrollClassName)}
-      >
+      <div ref={scrollRef} className={cn("flex-1 overflow-y-auto", scrollClassName)}>
         <div
           ref={containerRef}
           className="relative"

@@ -1,12 +1,11 @@
-import { AnimatePresence } from "framer-motion";
 import { ActivityUserMessage } from "../activity/ActivityUserMessage";
 import { AgentResponseSection } from "../activity/AgentResponseSection";
 import { AgentStreamItem } from "./AgentStreamItem";
 import type { AgentSectionItem, GroupedDisplayItem } from "../activity/utils";
-import type { ToolCallItem, CanvasSurface, AvailableCommand } from "../activity/types";
-import { cn } from "@/lib/utils.ts";
+import type { ToolCallItem, AvailableCommand } from "../activity/types";
+import { cn } from "@/lib/utils";
 import { useSettings } from "@/services/settings.service";
-import React, { useRef } from "react";
+import React, { memo, useRef } from "react";
 import {
   MessageScroller,
   MessageScrollerViewport,
@@ -33,13 +32,78 @@ function isAtEnd(viewport: HTMLElement) {
   return !viewport.getAttribute("data-scrollable")?.includes("end");
 }
 
+/*
+  Within a section that *did* change, only the row holding the new text should re-render.
+  `groupToolCalls` keeps wrapper identity for the rest, so a default shallow compare is enough
+  and no custom comparator is warranted.
+*/
+const MemoAgentStreamItem = memo(AgentStreamItem);
+
+/*
+  The stream's bail-out boundary. `groupIntoAgentSections` hands back the *same* section object
+  for a section nothing changed in, so a shallow compare here skips the whole subtree: the
+  `visibleItems` filter, the key derivation, and every row below. Without it a one-token chunk
+  re-rendered the entire transcript, because `AgentStreamContent` re-maps all its sections and
+  React has no per-element bail-out of its own.
+
+  The React Compiler does not remove the need for this. It memoizes values *inside* a component;
+  what is needed across a `.map()` is a bail-out at the component's prop boundary, which is
+  `memo`'s job and only `memo`'s.
+*/
+const AgentSectionRow = memo(function AgentSectionRow({
+  section,
+  sectionKey,
+  toolCallMap,
+  livePlanToolCallId,
+  thinkingHidden,
+  toolCallsHidden,
+  onAuthLogin,
+}: {
+  section: Extract<AgentSectionItem, { type: "agentSection" }>;
+  sectionKey: string;
+  toolCallMap: Map<string, ToolCallItem>;
+  livePlanToolCallId: string | null;
+  thinkingHidden: boolean;
+  toolCallsHidden: boolean;
+  onAuthLogin?: () => void;
+}) {
+  const visibleItems = section.items.filter((gi) => {
+    if (gi.type === "toolGroup") {
+      if (toolCallsHidden) return false;
+      return !gi.items.some((tc) => tc.toolCallId === livePlanToolCallId);
+    }
+    if (gi.item.type === "thinking") return !thinkingHidden;
+    return true;
+  });
+  if (visibleItems.length === 0) return null;
+
+  return (
+    <MessageScrollerItem messageId={sectionKey} className="px-3">
+      <AgentResponseSection>
+        {visibleItems.map((gi, i) => (
+          <MemoAgentStreamItem
+            key={getItemKey(gi)}
+            gi={gi}
+            isLastInSection={i === visibleItems.length - 1}
+            toolCallMap={toolCallMap}
+            onAuthLogin={onAuthLogin}
+          />
+        ))}
+      </AgentResponseSection>
+    </MessageScrollerItem>
+  );
+});
+
 interface AgentStreamContentProps {
   agentSections: AgentSectionItem[];
   toolCallMap: Map<string, ToolCallItem>;
-  canvasMap: Map<string, CanvasSurface>;
-  onOpenPlanOverlay: () => void;
+  /**
+   * The plan tool call whose request is still open, if any. Its row is left out of the stream
+   * because `inlinePermission` renders it at the bottom instead — two of the same card, one of
+   * them scrolled away mid-conversation, is worse than one in the place the user is answering from.
+   */
+  livePlanToolCallId: string | null;
   onOpenFile?: (uri: string) => void;
-  inlinePermission: React.ReactNode;
   bottomPadding?: number;
   onAuthLogin?: () => void;
   commands: AvailableCommand[];
@@ -48,10 +112,8 @@ interface AgentStreamContentProps {
 export function AgentStreamContent({
   agentSections,
   toolCallMap,
-  canvasMap,
-  onOpenPlanOverlay,
+  livePlanToolCallId,
   onOpenFile,
-  inlinePermission,
   bottomPadding,
   onAuthLogin,
   commands,
@@ -132,48 +194,23 @@ export function AgentStreamContent({
                   );
                 }
 
-                const { items } = section;
-
-                const visibleItems = items.filter((gi) => {
-                  if (gi.type === "toolGroup") return !toolCallsHidden;
-                  if (gi.item.type === "thinking") return !thinkingHidden;
-                  return true;
-                });
-                if (visibleItems.length === 0) return null;
-
-                const firstItem = items[0];
-                const sectionKey =
-                  firstItem.type === "toolGroup"
-                    ? `tg-${firstItem.items[0].toolCallId}`
-                    : firstItem.item.type === "toolCall"
-                      ? firstItem.item.item.toolCallId
-                      : firstItem.item.type === "canvas"
-                        ? firstItem.item.item.surfaceId
-                        : firstItem.item.item.id;
-
-                const sharedItemProps = {
-                  onOpenPlanOverlay,
-                  toolCallMap,
-                  canvasMap,
-                  onAuthLogin,
-                };
+                // Derived here rather than in the row because it is also the React key, which
+                // has to be on the element this callback returns.
+                const sectionKey = getItemKey(section.items[0]);
 
                 return (
-                  <MessageScrollerItem key={sectionKey} messageId={sectionKey} className="px-3">
-                    <AgentResponseSection>
-                      {visibleItems.map((gi, i) => (
-                        <AgentStreamItem
-                          key={getItemKey(gi)}
-                          gi={gi}
-                          isLastInSection={i === visibleItems.length - 1}
-                          {...sharedItemProps}
-                        />
-                      ))}
-                    </AgentResponseSection>
-                  </MessageScrollerItem>
+                  <AgentSectionRow
+                    key={sectionKey}
+                    section={section}
+                    sectionKey={sectionKey}
+                    toolCallMap={toolCallMap}
+                    livePlanToolCallId={livePlanToolCallId}
+                    thinkingHidden={thinkingHidden}
+                    toolCallsHidden={toolCallsHidden}
+                    onAuthLogin={onAuthLogin}
+                  />
                 );
               })}
-              <AnimatePresence>{inlinePermission}</AnimatePresence>
             </MessageScrollerContent>
           </MessageScrollerViewport>
         </MessageScroller>

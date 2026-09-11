@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { Copy, Check } from "lucide-react";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { Slider } from "@/ui/slider";
 import { MarkdownBlock, SvgBlock, MermaidBlock, HighlightedCode } from "./MarkdownBlock";
 import { imageMimeForExtension, langForExtension } from "./fileTypeUtils";
@@ -47,7 +47,7 @@ function FileContentInner({
         <iframe
           src={blobUrl ?? undefined}
           sandbox="allow-scripts"
-          className="w-full h-full border-0 bg-background custom-scrollbar"
+          className="w-full h-full border-0 bg-background"
           title={path.split("/").pop()}
         />
       );
@@ -80,8 +80,10 @@ function FileContentInner({
 
 interface WorkingFileContentViewProps {
   sessionKey: number;
-  /// Which machine the file is on. A path outside the session cwd is read directly rather than
-  /// through the session, and without this that read would land on whichever host runs Maestro.
+  /**
+   * Which machine the file is on. A path outside the session cwd is read directly rather than
+   * through the session, and without this that read would land on whichever host runs Maestro.
+   */
   connection: ConnectionKey;
   filePath: string | null;
   isActive?: boolean;
@@ -230,7 +232,7 @@ export function WorkingFileContentView({
       )}
       <div
         className={cn(
-          "flex-1 overflow-auto text-sm custom-scrollbar",
+          "flex-1 overflow-auto text-sm",
           viewType === "html" || viewType === "code" ? "p-0" : "px-6 py-5",
         )}
       >

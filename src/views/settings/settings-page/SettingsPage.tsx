@@ -111,7 +111,7 @@ export function SettingsPage({
 
           {/* Recessed to `bg-background`: the section cards inside are `bg-card`, so on a
               card-coloured well they would have no surface to sit on. */}
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-tl-xl border-t border-l border-border bg-background custom-scrollbar">
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-tl-xl border-t border-l border-border bg-background">
             <div className="mx-auto max-w-2xl p-6">
               <div className="mb-6">
                 <h1 className="text-2xl font-semibold text-foreground">
@@ -151,9 +151,11 @@ function AppScopePane({ pageId }: { pageId: string }) {
   );
 }
 
-/// Separate from `ProjectScopePane` rather than folded into it: these pages need only the
-/// connection, and that pane blocks on the project's settings — a page with no project to load
-/// would sit on "Loading settings..." for a query it does not use.
+/**
+ * Separate from `ProjectScopePane` rather than folded into it: these pages need only the
+ * connection, and that pane blocks on the project's settings — a page with no project to load
+ * would sit on "Loading settings..." for a query it does not use.
+ */
 function ConnectionScopePane({
   pageId,
   connection,
@@ -188,7 +190,7 @@ function ProjectScopePane({
   const settings = projectSettingsQuery.data;
 
   // The command takes the whole request, so a patch has to be merged onto what is stored —
-  // including `startup_tab`, which has no control here but must survive a write from one that has.
+  // every field a patch does not name has to survive a write from a control on another page.
   function updateSettings(patch: Partial<ProjectConfigRequest>) {
     if (!settings) return;
     updateProjectSettings.mutate({
@@ -257,7 +259,12 @@ function ProjectScopePane({
           issueTrackingIntegrations={issueTrackingIntegrations}
         />
       )}
-      {pageId === "project-appearance" && <ProjectAppearanceSection />}
+      {pageId === "project-appearance" && (
+        <ProjectAppearanceSection
+          startupTab={settings?.startup_tab ?? null}
+          onChange={updateSettings}
+        />
+      )}
     </div>
   );
 }

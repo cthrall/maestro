@@ -48,6 +48,16 @@ function trimCatchUpBuffer(buffer: string): string {
   return newlineAt === -1 ? buffer.slice(cutFrom) : buffer.slice(newlineAt + 1);
 }
 
+/**
+ * Every case here rebuilds `items` around the elements it changes rather than mapping the whole
+ * array — `[...items.slice(0, -1), updated]`, not `items.map(...)`. That is a contract, not a
+ * style: the wrapper caches in `utils.ts` are keyed on these element objects, and the stream's
+ * memoized rows compare on the wrappers. Replacing an untouched element with an equal copy is
+ * invisible here and re-renders the entire transcript for one token. The same goes for the
+ * `{ ...state }` spreads, which is why `toolCallMap` and `canvasMap` survive a chunk untouched.
+ *
+ * `AgentStreamContent.render.test.tsx` asserts this directly.
+ */
 export function activityReducer(state: ActivityState, action: ActivityAction): ActivityState {
   switch (action.type) {
     case "event":
@@ -119,20 +129,20 @@ function continuesMessage(existing: string | undefined, incoming: string | undef
 }
 
 function interruptStalledToolCalls(state: ActivityState): ActivityState {
-  const stalledIds: string[] = [];
+  const stalledIds = new Set<string>();
   for (const [id, tc] of state.toolCallMap) {
     if (tc.status === "in_progress" || tc.status === "pending") {
-      stalledIds.push(id);
+      stalledIds.add(id);
     }
   }
-  if (stalledIds.length === 0) return state;
+  if (stalledIds.size === 0) return state;
   const newMap = new Map(state.toolCallMap);
   for (const id of stalledIds) {
     const tc = newMap.get(id)!;
     newMap.set(id, { ...tc, status: "interrupted" });
   }
   const items = state.items.map((item) => {
-    if (item.type === "toolCall" && stalledIds.includes(item.item.toolCallId)) {
+    if (item.type === "toolCall" && stalledIds.has(item.item.toolCallId)) {
       return { ...item, item: newMap.get(item.item.toolCallId)! };
     }
     return item;

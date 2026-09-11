@@ -33,6 +33,9 @@ export const SETTINGS_PAGES: SettingsPageDef[] = [
     keywords: [
       "system title bar",
       "window frame",
+      "reduce motion",
+      "animations",
+      "performance",
       "global default color",
       "accent color",
       "new projects",
@@ -121,7 +124,14 @@ export const SETTINGS_PAGES: SettingsPageDef[] = [
     label: "Appearance",
     icon: Palette,
     scope: "project",
-    keywords: ["project color", "accent color", "header color"],
+    keywords: [
+      "project color",
+      "accent color",
+      "header color",
+      "opens on",
+      "startup tab",
+      "default tab",
+    ],
   },
 ];
 

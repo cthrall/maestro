@@ -1,28 +1,30 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Bot, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/ui/button";
 import { Input } from "@/ui/input";
 import { Textarea } from "@/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/ui/select";
 import { useAgentProfilesQuery, useSaveAgentProfilesMutation } from "@/services/project.service";
-import { useAgentConfigQuery } from "@/services/execution.service";
+import { useAgentConfigQuery, type AgentModel } from "@/services/execution.service";
 import { isReadOnlyRole, resolveAutomaticMode } from "@/lib/permission-modes";
 import { useSelectedProject } from "@/store/projectStore";
 import type { AgentProfile, AgentRole, ConnectionKey, ProfilesDocument } from "@/types/bindings";
 import { cn } from "@/lib/utils";
 
-/// The four roles, in the order a task passes through them.
-///
-/// Each line says what the role costs the user rather than what it is called: a project with no
-/// profile for a role simply skips that stage, and "no Reviewer" being the difference between a
-/// task stopping at your gate and going straight to it is not obvious from the word "Reviewer".
-///
-/// `defaultPrompt` is the text a new profile of that role starts with. It is copied into the
-/// profile on creation rather than applied as a fallback at resolution time, because the user has
-/// to be able to read it, edit it and delete it — none of which is true of a prompt that only
-/// exists as a hidden default. The cost of that choice is that editing the text here does not
-/// reach profiles already written, which is the right way round: those are the team's, not ours.
-/// Deliberately project-neutral, since the project-specific half is what the user adds.
+/**
+ * The four roles, in the order a task passes through them.
+ *
+ * Each line says what the role costs the user rather than what it is called: a project with no
+ * profile for a role simply skips that stage, and "no Reviewer" being the difference between a
+ * task stopping at your gate and going straight to it is not obvious from the word "Reviewer".
+ *
+ * `defaultPrompt` is the text a new profile of that role starts with. It is copied into the
+ * profile on creation rather than applied as a fallback at resolution time, because the user has
+ * to be able to read it, edit it and delete it — none of which is true of a prompt that only
+ * exists as a hidden default. The cost of that choice is that editing the text here does not
+ * reach profiles already written, which is the right way round: those are the team's, not ours.
+ * Deliberately project-neutral, since the project-specific half is what the user adds.
+ */
 const ROLES: Array<{ role: AgentRole; title: string; blurb: string; defaultPrompt: string }> = [
   {
     role: "Refiner",
@@ -77,11 +79,14 @@ interface AgentProfilesSectionProps {
   connection: ConnectionKey;
 }
 
-/// One profile's editable fields.
-///
-/// Its own component so it can ask for its own agent's models: the probe costs a real subprocess,
-/// and TanStack dedupes by query key, so four profiles all naming `claude-acp` pay for one session
-/// between them rather than four.
+/**
+ * One profile's editable fields.
+ *
+ * Its own component so it can ask for its own agent's models: the probe costs a real subprocess,
+ * and TanStack dedupes by query key, so four profiles naming `claude-acp` on the same model pay
+ * for one session between them rather than four. Naming different models is what splits them, and
+ * that is the point — the effort list differs per model.
+ */
 function ProfileCard({
   profile,
   title,
@@ -108,44 +113,77 @@ function ProfileCard({
   onMakeDefault: () => void;
   onRemove: () => void;
 }) {
+  const agentMissing = !!profile.agent_id && !agents.some((a) => a.id === profile.agent_id);
+  const agentLabel = agentMissing
+    ? `${profile.agent_id} (not found)`
+    : (agents.find((a) => a.id === profile.agent_id)?.name ?? "Select an agent");
+
+  // An agent this machine does not have cannot answer, and every field below clears what the probe
+  // does not confirm — so probing one would wipe a profile written on a machine that has it. The
+  // agent itself is still shown as `(not found)`, which is the honest thing to say about it.
+  const probeEnabled = !!profile.agent_id && !agentMissing;
+
   const {
     data: config,
     isLoading: probeLoading,
+    isSuccess: probeAnswered,
     isError: probeFailed,
   } = useAgentConfigQuery(
     profile.agent_id || null,
     projectPath,
     projectId,
     connection,
-    !!profile.agent_id,
+    // Effort is per-model, so the probe has to run against the model this profile names rather
+    // than whichever one the agent opens on.
+    profile.model ?? null,
+    probeEnabled,
   );
 
-  const available = config?.models ?? [];
-  const availableModes = config?.modes ?? [];
-  // The stored model survives a probe that did not return it — an agent reachable from another
-  // machine, a model the account lost, a list that simply arrived empty. Silently blanking the
-  // team's choice because this machine could not confirm it would be worse than showing it.
-  const unlisted = profile.model && !available.some((m) => m.model_id === profile.model);
-  // Same bargain for the mode, and it matters more: a mode this machine could not confirm is
-  // still what holds a read-only role read-only on the machine that wrote it.
-  const unlistedMode =
-    profile.permission_mode && !availableModes.some((m) => m.mode_id === profile.permission_mode);
+  // Memoized for the reset effects below: `?? []` hands them a fresh array on every render, which
+  // is a dependency that never settles.
+  const available = useMemo(() => config?.models ?? [], [config]);
+  const availableModes = useMemo(() => config?.modes ?? [], [config]);
+  const availableEfforts = useMemo(() => config?.effort?.values ?? [], [config]);
 
-  const agentMissing = !!profile.agent_id && !agents.some((a) => a.id === profile.agent_id);
-  const agentLabel = agentMissing
-    ? `${profile.agent_id} (not found)`
-    : (agents.find((a) => a.id === profile.agent_id)?.name ?? "Select an agent");
+  // Every reset below waits for this, and it is asserted rather than inferred from `!probeLoading`.
+  // A query whose key has just changed is neither loading nor answered for a render or two, and a
+  // disabled probe reports `isLoading: false` with no data for ever — both look exactly like "the
+  // agent offers nothing", which is what the resets act on. Reading the settled states directly is
+  // the difference between a re-probe and a wipe.
+  const probeSettled = probeEnabled && (probeAnswered || probeFailed);
 
-  const defaultModelLabel = probeLoading
-    ? "asking the agent…"
-    : probeFailed
-      ? "agent default (could not ask)"
-      : "agent default";
-  const modelLabel = !profile.model
-    ? defaultModelLabel
-    : unlisted
-      ? `${profile.model} (not offered)`
-      : (available.find((m) => m.model_id === profile.model)?.name ?? profile.model);
+  // The models a probe of *this agent* reported, kept across the re-probe that changing the model
+  // sets off. Retaining them is not showing a stale answer: the model list is a property of the
+  // agent, and the model the session opened on cannot change it. It is what lets this one field go
+  // on naming the model the user just picked, instead of blanking to "asking the agent…" for the
+  // one answer the user supplied themselves. Reset with the agent, whose list it is.
+  //
+  // Naming only. The reset effects below read the live `available`, which is empty until the probe
+  // settles and is exactly what they wait for.
+  const [namedModels, setNamedModels] = useState<AgentModel[]>([]);
+  const [namedFor, setNamedFor] = useState(profile.agent_id);
+  if (namedFor !== profile.agent_id) {
+    setNamedFor(profile.agent_id);
+    setNamedModels([]);
+  } else if (available.length > 0 && namedModels !== available) {
+    setNamedModels(available);
+  }
+  const modelName = (id: string) =>
+    (available.find((m) => m.model_id === id) ?? namedModels.find((m) => m.model_id === id))
+      ?.name ?? id;
+
+  // What the dropdown offers. Falling back to the retained list is what keeps the control alive
+  // during a re-probe: disabling it while the user's own selection was still settling meant
+  // base-ui tore down an open popup and reported the value as cleared, which read as the model
+  // reverting to "agent default" the moment it was picked.
+  const modelOptions = available.length > 0 ? available : namedModels;
+
+  const defaultModelItemLabel = probeFailed ? "agent default (could not ask)" : "agent default";
+  const defaultModelLabel = probeLoading ? "asking the agent…" : defaultModelItemLabel;
+  // Deliberately does not go to "asking the agent…" while probing: a chosen model is the one thing
+  // on this card that is not in question. Only the unchosen case defers to the probe, because
+  // "agent default" is genuinely a name nobody knows yet.
+  const modelLabel = profile.model ? modelName(profile.model) : defaultModelLabel;
 
   const readOnlyRole = isReadOnlyRole(profile.role);
   const automaticMode = resolveAutomaticMode(
@@ -153,14 +191,37 @@ function ProfileCard({
     readOnlyRole,
   );
 
-  // A profile that names no mode is filled in with the one its role needs as soon as the agent
-  // says what it offers, rather than left for the spawn to resolve every time. A stored mode is
-  // one the user can see, change, and is what the rest of the app reads; resolving it invisibly at
-  // spawn meant the field stayed blank and the answer lived nowhere.
+  // No field ever shows a value the agent did not offer. A stored value this machine cannot
+  // confirm is treated the same as one it confirmed absent, because the two are indistinguishable
+  // from here and the alternative — labelling it `(not offered)` — put a selection on screen that
+  // the spawn then silently ignored. The cost is real and deliberate: an unreachable agent clears
+  // the fields of the profiles naming it, for the whole team, since `profiles.json` is committed.
+  //
+  // Each write makes its own condition false, so none of these re-fire.
   useEffect(() => {
-    if (profile.permission_mode || !automaticMode) return;
+    if (!probeSettled || !profile.model) return;
+    if (available.some((m) => m.model_id === profile.model)) return;
+    onChange({ model: null }, true);
+  }, [probeSettled, profile.model, available, onChange]);
+
+  // The mode carries the fill-in case too: a profile that names none gets the one its role needs
+  // as soon as the agent says what it offers, rather than leaving the spawn to resolve it every
+  // time into a field that stays blank. Both cases are "replace what is stored with what the role
+  // would pick", which is why they are one effect.
+  useEffect(() => {
+    if (!probeSettled) return;
+    const stored = profile.permission_mode ?? null;
+    if (stored && availableModes.some((m) => m.mode_id === stored)) return;
+    if (stored === automaticMode) return;
     onChange({ permission_mode: automaticMode }, true);
-  }, [profile.permission_mode, automaticMode, onChange]);
+  }, [probeSettled, profile.permission_mode, availableModes, automaticMode, onChange]);
+
+  // Nothing to fill in here, unlike the mode: an unset effort is a real answer and the common one.
+  useEffect(() => {
+    if (!probeSettled || !profile.effort) return;
+    if (availableEfforts.some((e) => e.value === profile.effort)) return;
+    onChange({ effort: null }, true);
+  }, [probeSettled, profile.effort, availableEfforts, onChange]);
 
   // An agent that offers no modes has nothing to pick from, and a profile with nothing stored has
   // nothing to show, so the dropdown would open onto an empty list.
@@ -170,15 +231,25 @@ function ProfileCard({
   // still running, or an agent offering modes but none the role can use — and they say what is
   // happening rather than naming a choice that was never made.
   const modeLabel = profile.permission_mode
-    ? unlistedMode
-      ? `${profile.permission_mode} (not offered)`
-      : (availableModes.find((m) => m.mode_id === profile.permission_mode)?.name ??
-        profile.permission_mode)
+    ? (availableModes.find((m) => m.mode_id === profile.permission_mode)?.name ??
+      profile.permission_mode)
     : probeLoading
       ? "asking the agent…"
       : noModesToOffer
         ? "Not available"
         : "Select a permission mode";
+
+  // Unlike the mode, an unset effort is a real and common answer — most agents have no such
+  // setting, and those that do have a default of their own worth deferring to. So there is nothing
+  // to fill in, and "Not available" is reserved for an agent that offers none at all.
+  const noEffortToOffer = !probeLoading && availableEfforts.length === 0 && !profile.effort;
+  const effortLabel = profile.effort
+    ? (availableEfforts.find((e) => e.value === profile.effort)?.name ?? profile.effort)
+    : probeLoading
+      ? "asking the agent…"
+      : noEffortToOffer
+        ? "Not available"
+        : "agent default";
 
   return (
     // React's `onBlur` is `focusout`, which bubbles — one handler here covers the name and the
@@ -226,9 +297,18 @@ function ProfileCard({
           {/* `?? ""` because base-ui hands back null when a selection is cleared, which a native
               select could not do. An empty agent id is "not chosen yet", which the resolver
               already treats as falling back to the project default. */}
+          {/* The other three fields belong to the agent, so they go with it — in one patch, not as
+              a reset the probe works out afterwards. A model id is only meaningful to the harness
+              that issued it, and carrying one across meant the next probe asked the new agent to
+              select a model it had never heard of, which it answers with an error the user sees. */}
           <Select
             value={profile.agent_id}
-            onValueChange={(v) => onChange({ agent_id: v ?? "" }, true)}
+            onValueChange={(v) =>
+              onChange(
+                { agent_id: v ?? "", model: null, permission_mode: null, effort: null },
+                true,
+              )
+            }
           >
             <SelectTrigger size="sm" className="w-full text-xs" aria-label={agentLabel}>
               <span className="truncate flex-1 text-left">{agentLabel}</span>
@@ -252,9 +332,12 @@ function ProfileCard({
         </div>
         <div className="space-y-1">
           <span className="text-[11px] text-muted-foreground">Model</span>
+          {/* Only disabled while there is genuinely nothing to show — the first probe of an agent.
+              A re-probe leaves it live off the retained list, because that list cannot change and
+              the user has to be able to change their mind straight away. */}
           <Select
             value={profile.model ?? ""}
-            disabled={probeLoading}
+            disabled={probeLoading && modelOptions.length === 0}
             onValueChange={(v) => onChange({ model: v || null }, true)}
           >
             <SelectTrigger
@@ -266,14 +349,9 @@ function ProfileCard({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="" className="text-xs">
-                {defaultModelLabel}
+                {defaultModelItemLabel}
               </SelectItem>
-              {unlisted && (
-                <SelectItem value={profile.model!} className="text-xs">
-                  {profile.model} (not offered)
-                </SelectItem>
-              )}
-              {available.map((model) => (
+              {modelOptions.map((model) => (
                 <SelectItem key={model.model_id} value={model.model_id} className="text-xs">
                   {model.name}
                 </SelectItem>
@@ -283,42 +361,81 @@ function ProfileCard({
         </div>
       </div>
 
-      {/* Mode ids differ per harness, so the list is the agent's own — the same probe that
-          answers for the models answers for these. Every entry is a mode the agent really has:
-          the role's default is one of them, already selected, rather than a synthetic "automatic"
-          entry standing in for a choice nobody can see. */}
-      <div className="space-y-1">
-        <span className="text-[11px] text-muted-foreground">Permission mode</span>
-        <Select
-          value={profile.permission_mode ?? ""}
-          disabled={probeLoading || noModesToOffer}
-          onValueChange={(v) => onChange({ permission_mode: v || null }, true)}
-        >
-          <SelectTrigger
-            size="sm"
-            className="w-full text-xs"
-            aria-label={`Permission mode for ${profile.name}`}
+      <div className="grid grid-cols-2 gap-2">
+        {/* Mode ids differ per harness, so the list is the agent's own — the same probe that
+            answers for the models answers for these. Every entry is a mode the agent really has:
+            the role's default is one of them, already selected, rather than a synthetic "automatic"
+            entry standing in for a choice nobody can see. */}
+        <div className="space-y-1">
+          <span className="text-[11px] text-muted-foreground">Permission mode</span>
+          <Select
+            value={profile.permission_mode ?? ""}
+            disabled={probeLoading || noModesToOffer}
+            onValueChange={(v) => onChange({ permission_mode: v || null }, true)}
           >
-            <span className="truncate flex-1 text-left">{modeLabel}</span>
-          </SelectTrigger>
-          <SelectContent>
-            {unlistedMode && (
-              <SelectItem value={profile.permission_mode!} className="text-xs">
-                {profile.permission_mode} (not offered)
+            <SelectTrigger
+              size="sm"
+              className="w-full text-xs"
+              aria-label={`Permission mode for ${profile.name}`}
+            >
+              <span className="truncate flex-1 text-left">{modeLabel}</span>
+            </SelectTrigger>
+            <SelectContent>
+              {availableModes.map((mode) => (
+                <SelectItem key={mode.mode_id} value={mode.mode_id} className="text-xs">
+                  {mode.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {noModesToOffer && (
+            <p className="text-[11px] text-muted-foreground">
+              No permission mode available, the agent will use its own default.
+            </p>
+          )}
+        </div>
+
+        {/* Only some harnesses expose a reasoning budget, and it is not part of ACP proper — it
+            arrives as one entry in the generic config-option list, which is why the probe has to
+            find it rather than read a field. An agent without one leaves this disabled instead of
+            hiding it, so a profile written against an agent that has it still shows what it asks
+            for on a machine whose agent does not. */}
+        <div className="space-y-1">
+          <span className="text-[11px] text-muted-foreground">Effort</span>
+          <Select
+            value={profile.effort ?? ""}
+            disabled={probeLoading || noEffortToOffer}
+            onValueChange={(v) => onChange({ effort: v || null }, true)}
+          >
+            <SelectTrigger
+              size="sm"
+              className="w-full text-xs"
+              aria-label={`Effort for ${profile.name}`}
+            >
+              <span className="truncate flex-1 text-left">{effortLabel}</span>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="" className="text-xs">
+                agent default
               </SelectItem>
-            )}
-            {availableModes.map((mode) => (
-              <SelectItem key={mode.mode_id} value={mode.mode_id} className="text-xs">
-                {mode.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {noModesToOffer && (
-          <p className="text-[11px] text-muted-foreground">
-            No permission mode available, the agent will use its own default.
-          </p>
-        )}
+              {availableEfforts.map((effort) => (
+                <SelectItem key={effort.value} value={effort.value} className="text-xs">
+                  {effort.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {/* Names the model, not the agent: effort is a per-model setting, and the probe now runs
+              against the model this profile names, so "this agent has none" was both wrong and
+              unactionable — the fix is to pick a different model. */}
+          {noEffortToOffer && (
+            <p className="text-[11px] text-muted-foreground">
+              {profile.model
+                ? `${modelName(profile.model)} exposes no effort setting.`
+                : "This agent's default model exposes no effort setting."}
+            </p>
+          )}
+        </div>
       </div>
 
       <label className="text-[11px] text-muted-foreground space-y-1 block">
@@ -334,17 +451,19 @@ function ProfileCard({
   );
 }
 
-/// A profile id the user never has to see or type.
-///
-/// The id is what a task's override stores and what `defaults` points at, so it has to be stable
-/// and unique — but asking for one would be asking about a foreign key. Derived from the role and
-/// a timestamp rather than the name, because renaming a profile must not orphan the tasks pointing
-/// at it.
+/**
+ * A profile id the user never has to see or type.
+ *
+ * The id is what a task's override stores and what `defaults` points at, so it has to be stable
+ * and unique — but asking for one would be asking about a foreign key. Derived from the role and
+ * a timestamp rather than the name, because renaming a profile must not orphan the tasks pointing
+ * at it.
+ */
 function newProfileId(role: AgentRole): string {
   return `${role.toLowerCase()}-${Date.now().toString(36)}`;
 }
 
-/// Comparable form of the document, for skipping writes that would change nothing.
+/** Comparable form of the document, for skipping writes that would change nothing. */
 function serialize(profiles: AgentProfile[], defaults: Record<string, string>): string {
   return JSON.stringify({ profiles, defaults });
 }
@@ -390,11 +509,13 @@ export function AgentProfilesSection({ projectId, agents, connection }: AgentPro
     setDefaults({});
   }
 
-  /// There is no Save button: every change persists as it is made.
-  ///
-  /// The next profiles and defaults are passed in rather than read from state, because a handler
-  /// that just called `setProfiles` still sees the previous render's value. Guarded on `loaded`
-  /// so the adopt-from-query render can never write an empty document over the project's file.
+  /**
+   * There is no Save button: every change persists as it is made.
+   *
+   * The next profiles and defaults are passed in rather than read from state, because a handler
+   * that just called `setProfiles` still sees the previous render's value. Guarded on `loaded`
+   * so the adopt-from-query render can never write an empty document over the project's file.
+   */
   function saveNow(nextProfiles: AgentProfile[], nextDefaults: Record<string, string>) {
     if (!loaded) return;
     const next = serialize(nextProfiles, nextDefaults);

@@ -1,11 +1,11 @@
 import { useState, useMemo, useRef } from "react";
-import { useShortcuts } from "@/utils/hooks/useShortcuts";
+import { useShortcuts } from "@/hooks/useShortcuts";
 import { Plus, Archive, Search, BellDot } from "lucide-react";
 import { ShortcutHint } from "@/components/common/shortcut-hint/ShortcutHint";
 import { BoardView } from "@/views/kanban/board-view/BoardView";
 import { useActiveTaskId } from "@/store/navigationStore";
 import { useReviewPanelTaskId, useBoardActions } from "@/store/boardStore";
-import { TaskDetailModal } from "@/components/kanban/task-detail-modal/TaskDetailModal.tsx";
+import { TaskDetailModal } from "@/components/kanban/task-detail-modal/TaskDetailModal";
 import { TaskReviewPanel } from "@/components/execution/diff/TaskReviewPanel";
 import { useTasksQuery } from "@/services/task.service";
 import { useSelectedProject } from "@/store/projectStore";
@@ -16,14 +16,15 @@ import { Popover, PopoverTrigger, PopoverContent } from "@/ui/popover";
 import { Dialog, DialogContent, DialogTitle } from "@/ui/dialog";
 import { Checkbox } from "@/ui/checkbox";
 import { Button, buttonVariants } from "@/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/ui/tooltip";
 import type { Task, TaskPriority } from "@/types/bindings";
 import { PRIORITIES } from "@/utils/constants/priority";
 import { CreateTaskModal } from "@/components/kanban/create-task-modal/CreateTaskModal";
 import { ArchiveModal } from "@/components/kanban/archive-modal/ArchiveModal";
 import { useKanban } from "@/contexts/KanbanContext";
-import { useQueueDrain } from "@/utils/hooks/useQueueDrain";
-import { usePullRequestPoll } from "@/utils/hooks/usePullRequestPoll";
-import { useAgentPipeline } from "@/utils/hooks/useAgentPipeline";
+import { useQueueDrain } from "@/hooks/useQueueDrain";
+import { usePullRequestPoll } from "@/hooks/usePullRequestPoll";
+import { useAgentPipeline } from "@/hooks/useAgentPipeline";
 import { QueueCapacityBadge } from "@/components/kanban/QueueCapacityBadge";
 import { AutoModeToggle } from "@/components/kanban/AutoModeToggle";
 
@@ -229,17 +230,23 @@ export const KanbanView: React.FC = () => {
 
         <AutoModeToggle />
 
-        <Button
-          size="sm"
-          variant={needsMeOnly ? "accent" : "outline"}
-          onClick={() => setNeedsMeOnly((v) => !v)}
-          disabled={needsMeCount === 0 && !needsMeOnly}
-          title="Show only tasks the pipeline is waiting on you for"
-        >
-          <BellDot className="size-4" />
-          Needs me
-          {needsMeCount > 0 && <Badge variant="secondary">{needsMeCount}</Badge>}
-        </Button>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="sm"
+                variant={needsMeOnly ? "accent" : "outline"}
+                onClick={() => setNeedsMeOnly((v) => !v)}
+                disabled={needsMeCount === 0 && !needsMeOnly}
+              />
+            }
+          >
+            <BellDot className="size-4" />
+            Needs me
+            {needsMeCount > 0 && <Badge variant="secondary">{needsMeCount}</Badge>}
+          </TooltipTrigger>
+          <TooltipContent>Show only tasks the pipeline is waiting on you for</TooltipContent>
+        </Tooltip>
 
         <Button size="sm" variant="outline" onClick={() => setIsArchiveModalOpen(true)}>
           <Archive className="size-4" />

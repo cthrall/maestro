@@ -239,6 +239,24 @@ pub struct AppSettings {
     /// frameless. Ignored on macOS, which always uses its native title bar.
     #[serde(default)]
     pub native_window_frame: bool,
+    /// Switch off decorative animation — the accent bubbles above all, which cost one
+    /// infinitely-animated layer each and saturate a CPU on a machine compositing in software.
+    ///
+    /// `None` means nobody has chosen, and the frontend follows the machine: on when the OS asks
+    /// for reduced motion or no GPU acceleration is detected. Stored rather than derived so an
+    /// explicit `false` on such a machine survives, which a plain bool could not express.
+    #[serde(default)]
+    pub reduce_motion: Option<bool>,
+    /// How the Files tab lays out an open markdown file in edit mode: `source`, `split` or
+    /// `preview`. Stored so the choice survives a restart, since it is a working preference
+    /// rather than a per-file one. An unrecognised value falls back to `source`.
+    #[serde(default)]
+    pub markdown_edit_layout: Option<String>,
+    /// Whether the two panes of the markdown split view scroll together. `None` means nobody has
+    /// chosen, which the frontend reads as on — the sync is the point of the split view, and a
+    /// plain bool could not tell "never chosen" from an explicit off.
+    #[serde(default)]
+    pub markdown_scroll_sync: Option<bool>,
 }
 
 impl Default for AppSettings {
@@ -262,6 +280,9 @@ impl Default for AppSettings {
             notify_on_input_needed: false,
             notify_on_failure: false,
             native_window_frame: false,
+            reduce_motion: None,
+            markdown_edit_layout: None,
+            markdown_scroll_sync: None,
         }
     }
 }

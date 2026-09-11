@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { ChevronDown, Check, GitCompareArrows, FilePenLine, GitCommitVertical } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
+import { formatTimeAgoLong } from "@/lib/format-utils";
 import { Popover, PopoverTrigger, PopoverContent } from "@/ui/popover";
 import { Checkbox } from "@/ui/checkbox";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { Button } from "@/ui/button";
 import { commitSpan, fillSpan, type DiffScope } from "./scope";
 import type { CommitInfo } from "@/types/bindings";
@@ -26,11 +26,6 @@ interface ScopeSelectorProps {
 
 function shortSha(sha: string) {
   return sha.slice(0, 7);
-}
-
-function relativeTime(iso: string) {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? "" : formatDistanceToNow(date, { addSuffix: true });
 }
 
 /** Says what kind of scope this is. An icon rather than a colour, which named nothing. */
@@ -212,7 +207,7 @@ export function ScopeSelector({
             <div className="px-3 pt-3 pb-1 text-[10px] font-semibold tracking-wider text-muted-foreground">
               SELECT A RANGE OF COMMITS
             </div>
-            <div className="max-h-64 overflow-y-auto custom-scrollbar">
+            <div className="max-h-64 overflow-y-auto">
               {commits.map((commit) => {
                 const inDraft = draft.has(commit.sha);
                 const isCurrent =
@@ -237,7 +232,7 @@ export function ScopeSelector({
                       />
                     }
                     title={commit.message || shortSha(commit.sha)}
-                    subtitle={relativeTime(commit.committed_at)}
+                    subtitle={formatTimeAgoLong(commit.committed_at)}
                     trailing={
                       <span
                         className={cn(

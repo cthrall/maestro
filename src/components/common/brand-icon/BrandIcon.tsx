@@ -1,5 +1,5 @@
 import type { ForwardRefExoticComponent, RefAttributes, SVGProps } from "react";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import Github from "@thesvg/react/github";
 import Gitlab from "@thesvg/react/gitlab";
 import Jira from "@thesvg/react/jira";
@@ -64,7 +64,11 @@ export function BrandIcon({ slug, className, width = 16, height = 16 }: BrandIco
   if (!Icon) return null;
   return (
     <Icon
-      className={cn(className, DARK_INVERT_SLUGS.has(slug) && "dark:[filter:invert(1)]")}
+      className={cn(
+        className,
+        "pointer-events-none",
+        DARK_INVERT_SLUGS.has(slug) && "dark:[filter:invert(1)]",
+      )}
       width={width}
       height={height}
     />

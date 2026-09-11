@@ -1,6 +1,6 @@
 import { Check, CheckCheck, ChevronRight, Copy, MessageSquare } from "lucide-react";
 import { useState } from "react";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { computeFileStats } from "@/lib/diff-utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/ui/tooltip";
 import { useCopyToClipboard } from "@/components/execution/activity/HighlightedCode";
@@ -204,7 +204,7 @@ export function ReviewFileCard({
       {expanded && (
         <div
           className={cn(
-            "border border-t-0 rounded-b-lg overflow-auto custom-scrollbar transition-colors",
+            "border border-t-0 rounded-b-lg overflow-auto transition-colors",
             focused ? "border-accent" : "border-border",
           )}
         >

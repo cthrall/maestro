@@ -38,7 +38,7 @@ export function PlanGate({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onApprove: () => void;
-  /// `feedback` empty means "start over"; with text it means "this plan, but address this".
+  /** `feedback` empty means "start over"; with text it means "this plan, but address this". */
   onReplan: (feedback: string) => void;
 }) {
   const { data: comments } = useTaskCommentsQuery(open ? task.id : undefined);
@@ -74,7 +74,7 @@ export function PlanGate({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-w-0 max-h-[50vh] overflow-y-auto custom-scrollbar rounded-md bg-muted p-4 text-sm">
+        <div className="min-w-0 max-h-[50vh] overflow-y-auto rounded-md bg-muted p-4 text-sm">
           {body ? (
             <MarkdownBlock text={body} projectId={projectId} />
           ) : (

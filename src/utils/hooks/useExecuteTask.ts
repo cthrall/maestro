@@ -2,9 +2,12 @@ import { useState, useCallback, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import { api } from "@/utils/helpers/tauri-utils";
+import { api } from "@/lib/tauri-utils";
 import { taskBranchName } from "@/lib/generateSessionName";
 import { resolveAutomaticMode } from "@/lib/permission-modes";
+import { findEffortOption } from "@/lib/effort-option";
+import { parseProfileOverrides, profileIdFor, isRoleSkipped } from "@/lib/profile-overrides";
+import type { ConfigOption } from "@/components/execution/activity/types";
 import type {
   Task,
   JsonValue,
@@ -13,7 +16,7 @@ import type {
   WorkspaceMode,
   WorktreeWithStatus,
 } from "@/types/bindings";
-import { useResolveWorktree } from "@/utils/hooks/useResolveWorktree";
+import { useResolveWorktree } from "@/hooks/useResolveWorktree";
 import { useClaimWorktreeForTaskMutation, worktreeQueryKeys } from "@/services/worktree.service";
 import {
   useSpawnAcpSessionMutation,
@@ -36,31 +39,35 @@ interface DirtyState {
   resolve: (choice: DirtyChoice | "cancel") => void;
 }
 
-/// The task waiting on an agent to be chosen for it, and the promise that choice settles.
+/** The task waiting on an agent to be chosen for it, and the promise that choice settles. */
 interface AgentPickerState {
   task: Task;
   resolve: (agentId: string | null) => void;
 }
 
-/// Tells the agent how to signal that the task is finished.
-///
-/// Without it the board can only guess from whether the repository changed, which misreads an
-/// agent that edits some files and then stops to ask a question. Kept to a single line at the end
-/// of the prompt: it is short enough to read as an instruction rather than noise, and the agent's
-/// own marker is stripped from its reply by `acp/completion.rs` so the transcript stays clean.
+/**
+ * Tells the agent how to signal that the task is finished.
+ *
+ * Without it the board can only guess from whether the repository changed, which misreads an
+ * agent that edits some files and then stops to ask a question. Kept to a single line at the end
+ * of the prompt: it is short enough to read as an instruction rather than noise, and the agent's
+ * own marker is stripped from its reply by `acp/completion.rs` so the transcript stays clean.
+ */
 const COMPLETION_PROTOCOL =
   "When the task is complete and needs no further work, end your final message with `<maestro-task-complete/>` — " +
   "it moves the task to review, so omit it if you are asking a question or reporting a blocker.";
 
-/// What the refiner is for, in the absence of a profile that says it better.
-///
-/// It is asked for a rewritten description and nothing else, because its final message *is* the
-/// proposal: whatever it ends its turn with is what the gate offers to put in the task. A preamble
-/// or a summary of what it changed would end up in the description verbatim.
-///
-/// The instruction not to modify anything is a second line of defence, not the mechanism. The real
-/// one is the read-only permission mode below — an instruction is advice, and the proposal gate is
-/// only meaningful if accepting it is the first time anything changes.
+/**
+ * What the refiner is for, in the absence of a profile that says it better.
+ *
+ * It is asked for a rewritten description and nothing else, because its final message *is* the
+ * proposal: whatever it ends its turn with is what the gate offers to put in the task. A preamble
+ * or a summary of what it changed would end up in the description verbatim.
+ *
+ * The instruction not to modify anything is a second line of defence, not the mechanism. The real
+ * one is the read-only permission mode below — an instruction is advice, and the proposal gate is
+ * only meaningful if accepting it is the first time anything changes.
+ */
 const REFINER_PROTOCOL =
   "Read whatever you need from the repository, then reply with the improved task description and " +
   "nothing else — no preamble, no summary of your changes, no code fences around the whole reply. " +
@@ -68,31 +75,37 @@ const REFINER_PROTOCOL =
   "existing title, so do not restate it as a heading — start with the description itself. Do not " +
   "modify any files.";
 
-/// What the planner is for, in the absence of a profile that says it better.
-///
-/// Like the refiner, its final message *is* the artifact: the plan is what the gate shows and what
-/// the coder is given. It cannot write the plan to a file itself — it is held read-only, which is
-/// the whole basis of the plan gate — so Maestro carries it.
+/**
+ * What the planner is for, in the absence of a profile that says it better.
+ *
+ * Like the refiner, its final message *is* the artifact: the plan is what the gate shows and what
+ * the coder is given. It cannot write the plan to a file itself — it is held read-only, which is
+ * the whole basis of the plan gate — so Maestro carries it.
+ */
 const PLANNER_PROTOCOL =
   "Investigate the repository and reply with an implementation plan in markdown: what to change, " +
   "in what order, and anything you found that constrains the approach. Do not modify any files — " +
   "your reply is the plan, and the user decides whether it is implemented.";
 
-/// What the reviewer is for, in the absence of a profile that says it better.
-///
-/// The verdict line is ordinary text rather than a hidden marker because it is the headline of
-/// what goes into the outcome thread — the user reads it, and a stripped marker would leave the
-/// thread saying nothing about the conclusion. `classify_verdict` reads only that first line, and
-/// treats anything it cannot parse as approval, which sends the task to the human gate rather than
-/// spending another coder round on a guess.
+/**
+ * What the reviewer is for, in the absence of a profile that says it better.
+ *
+ * The verdict line is ordinary text rather than a hidden marker because it is the headline of
+ * what goes into the outcome thread — the user reads it, and a stripped marker would leave the
+ * thread saying nothing about the conclusion. `classify_verdict` reads only that first line, and
+ * treats anything it cannot parse as approval, which sends the task to the human gate rather than
+ * spending another coder round on a guess.
+ */
 const REVIEWER_PROTOCOL =
   "Review the changes on this branch against the task. Start your reply with a single line " +
   "reading exactly `APPROVED` or `CHANGES REQUESTED`, then say why — for changes, be specific " +
   "about what to fix and where, because your reply is what the coder is given. Do not modify any " +
   "files.";
 
-/// The stage a role runs, as the board names it. Roles are an internal noun; the user picked
-/// "Refine" off a card and configured "Refinement" in Settings.
+/**
+ * The stage a role runs, as the board names it. Roles are an internal noun; the user picked
+ * "Refine" off a card and configured "Refinement" in Settings.
+ */
 const ROLE_STAGE_LABELS: Record<AgentRole, string> = {
   Refiner: "Refinement",
   Planner: "Planning",
@@ -116,7 +129,10 @@ export function useExecuteTask(
   const markExecutionStarted = useMarkTaskExecutionStartedMutation();
   const markSessionReady = useMarkTaskSessionReadyMutation();
   const releaseClaim = useReleaseTaskExecutionClaimMutation();
-  const [isExecuting, setIsExecuting] = useState(false);
+  // Which task is mid-spawn, not merely that one is. The board shares a single instance of this
+  // hook across every card, so a bare boolean would disable Execute on all of them while any one
+  // task started.
+  const [executingTaskId, setExecutingTaskId] = useState<number | null>(null);
   const [dirtyState, setDirtyState] = useState<DirtyState | null>(null);
   const dirtyResolveRef = useRef<((choice: DirtyChoice | "cancel") => void) | null>(null);
   const [agentPickerState, setAgentPickerState] = useState<AgentPickerState | null>(null);
@@ -126,56 +142,52 @@ export function useExecuteTask(
   const { data: discovery } = useAgentDiscoveryQuery(connection, projectId != null);
   const navigation = useNavigationActions();
 
-  /// `respectCapacity` belongs to the button, not to this function.
-  ///
-  /// The scheduler's own picks must not re-check: it counted them against the slots free when it
-  /// ran, so asking again once the first has started would defer the rest of its own batch. The
-  /// rework restart must not either — that task is not in Queue, and a deferral there would be a
-  /// promise the drain has no way to keep.
-  ///
-  /// `role` decides which profile is resolved, whether the agent gets a worktree, whether it is
-  /// held read-only, and — through `mark_task_session_ready` — which column and phase the task
-  /// lands in. Everything else about starting an agent is the same for all four.
-  ///
-  /// `feedback` is what the user wrote at a gate: notes on a plan they want addressed rather than
-  /// started over from. Not persisted, because it is only meaningful in the prompt it is about to
-  /// become — the plan it refers to is replaced by the one this run produces.
-  ///
-  /// `unattended` says nobody pressed anything and nobody is watching: the board handed one role's
-  /// work to the next. Anything that would stop to ask a question has to be skipped rather than
-  /// merely defaulted, because the caller renders none of the dialogs that would ask it.
-  ///
-  /// `canPickAgent` is the caller promising it renders `AgentPickerModal` from the state returned
-  /// below. Opt-in rather than inferred from `unattended`, because "a person pressed this" and "a
-  /// component is rendering the dialog it needs" are not the same claim, and only the second one
-  /// makes the promise resolvable.
   const execute = async (
     task: Task,
     {
+      /**
+       * Ask the host whether it has room first. Belongs to the button: the scheduler's own picks
+       * already counted against the slots free when it ran, so re-checking would defer the rest of
+       * its own batch.
+       */
       respectCapacity = false,
+      /**
+       * Which stage this is. Decides the profile, whether the agent gets a worktree, whether it is
+       * held read-only, and — through `mark_task_session_ready` — where the task lands. Everything
+       * else about starting an agent is the same for all four.
+       */
       role: requestedRole = "Coder" as AgentRole,
+      /**
+       * What the user wrote at a gate. Not persisted: it is only meaningful in the prompt it is
+       * about to become, and the plan it refers to is replaced by the one this run produces.
+       */
       feedback = "",
+      /**
+       * Nobody pressed anything and nobody is watching — the board handed one role's work to the
+       * next. Anything that would stop to ask has to be skipped rather than defaulted, because the
+       * caller renders none of the dialogs that would ask it.
+       */
       unattended = false,
+      /**
+       * The caller promising it renders `AgentPickerModal` from the state returned below. Opt-in
+       * rather than inferred from `unattended`: "a person pressed this" and "a component is
+       * rendering the dialog it needs" are different claims, and only the second is resolvable.
+       */
       canPickAgent = false,
     } = {},
   ) => {
     if (!projectId) return;
 
-    /// Which profile this task asked for, per role. Parsed defensively: it is written by the card's
-    /// override dialog, and a task that cannot be started is a worse outcome than one that starts
-    /// with the project's defaults.
-    let overrides: Record<string, string> = {};
-    if (task.profile_overrides) {
-      try {
-        overrides = JSON.parse(task.profile_overrides) as Record<string, string>;
-      } catch {
-        console.warn(`Ignoring unreadable profile overrides on task ${task.id}`);
-      }
-    }
-    const profileFor = (role: AgentRole) => overrides[role] ?? null;
+    /** Which profile this task asked for, per role, and which stages it has turned off. */
+    const overrides = parseProfileOverrides(task.profile_overrides);
+    const profileFor = (role: AgentRole) => profileIdFor(overrides, role);
 
     // Planning runs first when the project has a planner, which is what "optional plan agent"
     // means in practice — Execute is one button whether or not a plan stage exists.
+    //
+    // Unless this task said not to: a project-wide planner is still opt-out one task at a time,
+    // and the check comes before `resolveAgentProfile` because a skipped stage has nothing to
+    // resolve — the project's planner is exactly what it is declining.
     //
     // Only from a standing start. At the plan gate the task is at `PlanReview` with a phase, and
     // approving the plan calls this with the coder explicitly; without the guard that approval
@@ -183,8 +195,9 @@ export function useExecuteTask(
     const plannerFirst =
       requestedRole === "Coder" &&
       task.phase == null &&
+      !isRoleSkipped(overrides, "Planner") &&
       (await api
-        .resolveAgentProfile(projectId, "Planner", profileFor("Planner"), [], [], false)
+        .resolveAgentProfile(projectId, "Planner", profileFor("Planner"), [], [], true)
         .then((profile) => profile !== null)
         .catch(() => false));
 
@@ -244,10 +257,14 @@ export function useExecuteTask(
 
     // Resolution order is profile → project override → task override, so the task wins where it
     // says something. Asked for before the capabilities are known because the agent it names is
-    // what gets spawned; the model and mode are applied afterwards, once the agent has reported
-    // what it supports.
+    // what gets spawned; the model, mode and effort are applied afterwards, once the agent has
+    // reported what it supports.
+    //
+    // `true` for the effort here is the same claim `[]` makes for the two lists: not "supported",
+    // but "not yet asked". A `false` would be a verdict, and on a profile set to fail rather than
+    // degrade it would refuse the spawn over a capability nothing has looked at.
     const roleProfile = await api
-      .resolveAgentProfile(projectId, role, profileFor(role), [], [], false)
+      .resolveAgentProfile(projectId, role, profileFor(role), [], [], true)
       .catch(() => null);
 
     // The task's own agent is the coder's, so it must not be imposed on the other three: a task
@@ -322,7 +339,7 @@ export function useExecuteTask(
       return;
     }
 
-    setIsExecuting(true);
+    setExecutingTaskId(task.id);
     let logId: number | null = null;
     // Set once the task owns a live session; until then any exit has to hand the claim back.
     let claimHandedOver = false;
@@ -400,6 +417,10 @@ export function useExecuteTask(
       // because a plan and its implementation can be different agents on different models and a
       // pipeline that only works when they happen to match is a pipeline with a hidden precondition.
       let capturedModeIds: string[] = [];
+      // The id of the effort setting this agent exposes, or `""` for an agent that exposes none —
+      // a verdict rather than a gap, unlike the modes above: the config options arrive with the
+      // spawn response or not at all.
+      let capturedEffortId = "";
 
       const spawnResult = await spawnAcpSessionMutation.mutateAsync({
         agentId,
@@ -416,12 +437,14 @@ export function useExecuteTask(
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
           unlistenSpawnOk();
+          unlistenConfigOptions();
           unlistenSessionError();
           reject(new Error("Agent spawn timed out after 30s"));
         }, 30_000);
 
         let unlistenSpawnOk: () => void = () => {};
         let unlistenModes: () => void = () => {};
+        let unlistenConfigOptions: () => void = () => {};
         let unlistenSessionError: () => void = () => {};
 
         listen<{ current_mode_id: string; available_modes: { mode_id: string }[] }>(
@@ -434,10 +457,20 @@ export function useExecuteTask(
           unlistenModes = fn;
         });
 
+        // Effort has no event of its own — it is one entry in the generic config-option list the
+        // reader emits from the same spawn response the modes come off.
+        listen<{ configOptions?: ConfigOption[] }>(`acp://config-state-updated/${logId}`, (e) => {
+          capturedEffortId = findEffortOption(e.payload.configOptions ?? [])?.id ?? "";
+          unlistenConfigOptions();
+        }).then((fn) => {
+          unlistenConfigOptions = fn;
+        });
+
         listen<null>(`acp://spawn-ok/${logId}`, () => {
           clearTimeout(timer);
           unlistenSpawnOk();
           unlistenModes();
+          unlistenConfigOptions();
           unlistenSessionError();
           resolve();
         }).then((fn) => {
@@ -448,6 +481,7 @@ export function useExecuteTask(
           clearTimeout(timer);
           unlistenSpawnOk();
           unlistenModes();
+          unlistenConfigOptions();
           unlistenSessionError();
           reject(new Error(e.payload));
         }).then((fn) => {
@@ -458,7 +492,14 @@ export function useExecuteTask(
       // Asked again now that the agent has said what it supports, so anything it cannot honour is
       // dropped with a warning rather than being sent and silently failing.
       const resolved = await api
-        .resolveAgentProfile(projectId, role, profileFor(role), [], capturedModeIds, false)
+        .resolveAgentProfile(
+          projectId,
+          role,
+          profileFor(role),
+          [],
+          capturedModeIds,
+          capturedEffortId !== "",
+        )
         .catch(() => null);
 
       for (const warning of resolved?.warnings ?? []) {
@@ -473,6 +514,17 @@ export function useExecuteTask(
           await api.setAcpModel(logId, model);
         } catch (err) {
           console.warn("Failed to set model:", err);
+        }
+      }
+
+      // Addressed by the agent's own config id rather than a fixed name: "effort" and
+      // "thought_level" are categories, and the id under them differs per harness. There is no task
+      // override — effort is a property of how a role should work, which is what a profile is for.
+      if (resolved?.effort && capturedEffortId) {
+        try {
+          await api.setAcpConfigOption(logId, capturedEffortId, resolved.effort);
+        } catch (err) {
+          console.warn("Failed to set effort:", err);
         }
       }
 
@@ -690,7 +742,10 @@ export function useExecuteTask(
           .mutateAsync({ taskId: task.id, failed: spawnFailed })
           .catch((err) => console.error("Failed to release the execution claim:", err));
       }
-      setIsExecuting(false);
+      // Only if this task is still the one showing as starting. The queue drain runs `execute`
+      // for a batch, so a later spawn can already have claimed the flag by the time this one
+      // unwinds — clearing unconditionally would take the badge off the card that still has it.
+      setExecutingTaskId((current) => (current === task.id ? null : current));
     }
   };
 
@@ -712,14 +767,19 @@ export function useExecuteTask(
 
   return {
     execute,
-    isExecuting,
+    /** The task mid-spawn, for a caller rendering more than one card off one instance of this hook. */
+    executingTaskId,
+    /** The same fact for the callers that only ever drive one task. */
+    isExecuting: executingTaskId !== null,
     dirtyDialogOpen: dirtyState !== null,
     dirtyModifiedCount: dirtyState?.modifiedCount ?? 0,
     dirtyUntrackedCount: dirtyState?.untrackedCount ?? 0,
     onDirtyChoice,
     onDirtyCancel,
-    /// Only ever set for a caller that passed `canPickAgent`; everyone else gets a toast instead
-    /// and never renders the modal.
+    /**
+     * Only ever set for a caller that passed `canPickAgent`; everyone else gets a toast instead
+     * and never renders the modal.
+     */
     agentPickerTask: agentPickerState?.task ?? null,
     onAgentPicked,
     onAgentPickerCancel,

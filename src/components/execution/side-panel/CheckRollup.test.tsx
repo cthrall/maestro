@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { BranchPullRequestInfo, PullRequestCheckInfo } from "@/types/bindings";
+import type { PullRequestCheckInfo } from "@/types/bindings";
+import type { SessionPullRequest } from "./useSessionShipState";
 
 vi.mock("@/services/task.service", () => ({
   useTaskAttachmentsQuery: () => ({ data: [] }),
@@ -9,9 +10,9 @@ vi.mock("@/services/task.service", () => ({
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
-const { CheckRollup, PullRequestFacts, branchSummary } = await import("./OverviewPanel");
+const { CheckRollup, PullRequestFacts, branchSummary } = await import("./PullRequestCard");
 
-function pullRequest(overrides: Partial<BranchPullRequestInfo> = {}): BranchPullRequestInfo {
+function pullRequest(overrides: Partial<SessionPullRequest> = {}): SessionPullRequest {
   return {
     number: 310,
     url: "https://github.com/emdgroup/maestro/pull/310",
@@ -38,8 +39,10 @@ function check(name: string, status: PullRequestCheckInfo["status"]): PullReques
 }
 
 describe("CheckRollup", () => {
-  /// The card previously said "checks running" in the header and "checks running" again in the
-  /// body. The ring replaces the second copy with progress the header cannot express.
+  /**
+   * The card previously said "checks running" in the header and "checks running" again in the
+   * body. The ring replaces the second copy with progress the header cannot express.
+   */
   it("counts what has finished, not what has passed", () => {
     render(
       <CheckRollup
@@ -57,8 +60,10 @@ describe("CheckRollup", () => {
     expect(screen.getByText("1 failing · 1 running")).toBeInTheDocument();
   });
 
-  /// A red check is the one thing on this card that needs a decision. Hiding it behind a click is
-  /// how it gets missed, so a failure opens the list itself.
+  /**
+   * A red check is the one thing on this card that needs a decision. Hiding it behind a click is
+   * how it gets missed, so a failure opens the list itself.
+   */
   it("opens itself when something has failed", () => {
     render(
       <CheckRollup
@@ -75,7 +80,7 @@ describe("CheckRollup", () => {
     ]);
   });
 
-  /// Nothing red means nothing to decide, and the ring already says how far along the run is.
+  /** Nothing red means nothing to decide, and the ring already says how far along the run is. */
   it("stays shut while everything is fine, and opens on demand", async () => {
     const user = userEvent.setup();
     render(
@@ -89,8 +94,10 @@ describe("CheckRollup", () => {
     expect(screen.getAllByTestId("check-name")).toHaveLength(2);
   });
 
-  /// The card itself opens the forge on click. Without stopPropagation, expanding the list would
-  /// also launch a browser tab.
+  /**
+   * The card itself opens the forge on click. Without stopPropagation, expanding the list would
+   * also launch a browser tab.
+   */
   it("does not let the toggle reach the card", async () => {
     const user = userEvent.setup();
     const onCardClick = vi.fn();
@@ -103,15 +110,17 @@ describe("CheckRollup", () => {
     expect(onCardClick).not.toHaveBeenCalled();
   });
 
-  /// Gitea and Forgejo enumerate nothing. A ring drawn at zero of zero would claim a run that does
-  /// not exist, so the bare verdict stands in.
+  /**
+   * Gitea and Forgejo enumerate nothing. A ring drawn at zero of zero would claim a run that does
+   * not exist, so the bare verdict stands in.
+   */
   it("falls back to the verdict when the forge names no checks", () => {
     render(<CheckRollup ci="Pending" checks={[]} />);
     expect(screen.getByText("checks running")).toBeInTheDocument();
     expect(screen.queryByTestId("failing-names")).not.toBeInTheDocument();
   });
 
-  /// "2 of 2 checks done" is true and still reads like something might be pending.
+  /** "2 of 2 checks done" is true and still reads like something might be pending. */
   it("says so plainly when everything passed", () => {
     render(
       <CheckRollup ci="Passing" checks={[check("build", "Passed"), check("e2e", "Passed")]} />,
@@ -127,8 +136,10 @@ describe("CheckRollup", () => {
 });
 
 describe("branchSummary", () => {
-  /// `head → base` rather than a sentence: the branch names are the content, and "into"/"from"
-  /// spend the column's width on words that are identical on every card.
+  /**
+   * `head → base` rather than a sentence: the branch names are the content, and "into"/"from"
+   * spend the column's width on words that are identical on every card.
+   */
   it("reads as the card subtitle", () => {
     expect(branchSummary(pullRequest())).toBe("maestro/great-lynx-58 → main · 2 commits");
     expect(branchSummary(pullRequest({ commits: 1 }))).toBe(
@@ -137,8 +148,10 @@ describe("branchSummary", () => {
     expect(branchSummary(pullRequest({ commits: null }))).toBe("maestro/great-lynx-58 → main");
   });
 
-  /// A subtitle reading " → " is worse than falling back to the number, which is what a null
-  /// return asks the caller to do.
+  /**
+   * A subtitle reading " → " is worse than falling back to the number, which is what a null
+   * return asks the caller to do.
+   */
   it("declines when the forge named neither branch", () => {
     expect(branchSummary(pullRequest({ base_branch: null }))).toBeNull();
     expect(branchSummary(pullRequest({ head_branch: null }))).toBeNull();
@@ -158,8 +171,10 @@ describe("PullRequestFacts", () => {
     expect(screen.getByText("−18")).toBeInTheDocument();
   });
 
-  /// GitLab reports no line counts on the merge request. Rendering them anyway would put
-  /// "0 files +0 −0" on a card describing real work.
+  /**
+   * GitLab reports no line counts on the merge request. Rendering them anyway would put
+   * "0 files +0 −0" on a card describing real work.
+   */
   it("drops the metrics a forge would not answer", () => {
     render(
       <PullRequestFacts
@@ -175,7 +190,7 @@ describe("PullRequestFacts", () => {
     expect(screen.queryByText(/\+/)).not.toBeInTheDocument();
   });
 
-  /// Nothing to say and nothing wrong means no row at all, rather than an empty strip of padding.
+  /** Nothing to say and nothing wrong means no row at all, rather than an empty strip of padding. */
   it("renders nothing when it has nothing to report", () => {
     const { container } = render(
       <PullRequestFacts
@@ -191,8 +206,10 @@ describe("PullRequestFacts", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  /// `null` is the forge still computing the merge commit, which is what every freshly pushed
-  /// branch returns. Warning on it would train the user to ignore the warning.
+  /**
+   * `null` is the forge still computing the merge commit, which is what every freshly pushed
+   * branch returns. Warning on it would train the user to ignore the warning.
+   */
   it("warns about conflicts only on a positive answer", () => {
     render(<PullRequestFacts pullRequest={pullRequest({ mergeable: null })} />);
     expect(screen.queryByText(/Conflicts/)).not.toBeInTheDocument();

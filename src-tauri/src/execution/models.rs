@@ -45,7 +45,7 @@ pub struct AheadBehind {
 pub struct Worktree {
     pub id: i32,
     pub project_id: i32,
-    pub task_id: Option<i32>,       // nullable — None for manually created worktrees
+    pub task_id: Option<i32>, // nullable — None for manually created worktrees
     pub branch_name: String,
     pub base_branch: Option<String>, // origin branch this worktree was created from
     pub path: String,
@@ -57,18 +57,18 @@ pub struct Worktree {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[specta(export)]
 pub struct WorktreeWithStatus {
-    pub id: Option<i32>,                 // None if orphan (on-disk but no DB row)
+    pub id: Option<i32>, // None if orphan (on-disk but no DB row)
     pub project_id: Option<i32>,
     pub task_id: Option<i32>,
     pub branch_name: String,
     pub path: String,
-    pub changed_files_count: u32,        // number of changed + untracked files; 0 if clean
+    pub changed_files_count: u32, // number of changed + untracked files; 0 if clean
     pub created_at: Option<String>,
-    pub task_name: Option<String>,       // from tasks table join
-    pub is_zombie: bool,                 // task_id IS NULL AND path matches agent convention
-    pub is_orphan: bool,                 // on-disk but not in DB
-    pub diff_stat: Option<String>,       // raw output of `git diff HEAD --shortstat`; None if clean
-    pub base_branch: Option<String>,     // origin branch persisted at worktree creation time
+    pub task_name: Option<String>,         // from tasks table join
+    pub is_zombie: bool,                   // task_id IS NULL AND path matches agent convention
+    pub is_orphan: bool,                   // on-disk but not in DB
+    pub diff_stat: Option<String>, // raw output of `git diff HEAD --shortstat`; None if clean
+    pub base_branch: Option<String>, // origin branch persisted at worktree creation time
     pub ahead_behind: Option<AheadBehind>, // ahead/behind counts vs upstream tracking branch
     /// Commits this worktree's branch has that its base branch does not — the work done here.
     /// `None` when there is no base branch to count against, or it no longer resolves.
@@ -83,6 +83,14 @@ pub struct WorktreeWithStatus {
     /// still carries the name recorded at creation, because that is what branch operations need —
     /// but showing it would claim a branch that is not checked out.
     pub detached_at: Option<String>,
+    /// The full sha HEAD points at, on a branch or not. Compared against a pull request's head sha
+    /// to tell a branch whose work has landed from one that has moved on past the merge.
+    pub head_sha: String,
+    /// Whether this branch had an upstream that has since been deleted — what a forge does to the
+    /// head branch when it merges a pull request. Read from `%(upstream:track)` saying `gone`, and
+    /// never inferred from `ahead_behind` being `None`: that covers a branch which was never pushed
+    /// just as much as one whose upstream was pruned, and those want opposite offers.
+    pub upstream_gone: bool,
 }
 
 /// Session kind: an ACP-managed AI agent or a user-controlled PTY shell.

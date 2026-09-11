@@ -1,8 +1,9 @@
-import { useState, useMemo, useEffect, useRef } from "react";
-import { useShortcuts } from "@/utils/hooks/useShortcuts";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useShortcuts } from "@/hooks/useShortcuts";
 import { ShortcutHint } from "@/components/common/shortcut-hint/ShortcutHint";
 import { ChevronsUpDown, GitBranch, Plus, RefreshCw, Scissors, SearchIcon } from "lucide-react";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { Button } from "@/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/ui/tooltip";
 import { Spinner } from "@/ui/spinner";
@@ -16,24 +17,32 @@ import {
   useActiveTab,
   useNavigate,
 } from "@/store/navigationStore";
-import { useWorktreesQuery, usePrunableBranchesQuery } from "@/services/worktree.service";
+import {
+  useFetchProjectRemoteMutation,
+  usePrunableBranchesQuery,
+  useWorktreesQuery,
+} from "@/services/worktree.service";
 import { useActiveSessionsQuery } from "@/services/execution.service";
-import { useNow } from "@/utils/hooks/useNow";
+import { useNow } from "@/hooks/useNow";
 import { useGitInitProject } from "@/services/project.service";
 import { useIsGitRepo, useSelectedProject, useSelectedProjectActions } from "@/store/projectStore";
 import { WorktreeCardGrid } from "@/components/execution/worktree-card/WorktreeCardGrid";
-import { sessionsByWorktree } from "@/components/execution/worktree-card/worktree-usage";
 import {
-  pullRequestsByBranch,
-  usePullRequestCi,
-} from "@/components/execution/worktree-card/pullRequestCi";
+  groupWorktrees,
+  isRepositoryRoot,
+  sessionsByWorktree,
+} from "@/components/execution/worktree-card/worktree-usage";
 import { PullRequestPanel } from "@/components/execution/pull-request-panel/PullRequestPanel";
 import type { PullRequestEntry } from "@/components/execution/pull-request-panel/pullRequestFilters";
 import {
   SpawnSessionDialog,
   type SpawnSeed,
 } from "@/components/execution/spawn-session-dialog/SpawnSessionDialog";
-import { useCodeHostingStatus, useProjectPullRequests } from "@/services/integration.service";
+import {
+  integrationQueryKeys,
+  useCodeHostingStatus,
+  useProjectPullRequestPage,
+} from "@/services/integration.service";
 import { WorktreeDiffPanel } from "@/components/execution/diff/WorktreeDiffPanel";
 import { DeleteWorktreeDialog } from "@/components/execution/worktree-dialog/DeleteWorktreeDialog";
 import { CreateWorktreeDialog } from "@/components/execution/worktree-dialog/CreateWorktreeDialog";
@@ -72,6 +81,8 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
     isLoading,
     isFetching,
   } = useWorktreesQuery(isGitRepo ? projectId : undefined, isGitRepo ? repoPath : undefined);
+  const { mutateAsync: fetchProjectRemote, isPending: isFetchingRemote } =
+    useFetchProjectRemoteMutation();
   const { data: sessions = [] } = useActiveSessionsQuery(projectId);
   // The age labels are derived at render, so something has to re-render them; one ticker here
   // drives every card rather than one timer per card.
@@ -83,19 +94,44 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
   const { clearPendingWorktree } = useNavigationActions();
   const navigate = useNavigate();
 
-  // Every pull request in the project, in one request — the cards and the panel look themselves up
-  // in this list rather than each asking the forge. Gated on the view being on screen, because a
-  // Kanban user is not looking at any of it.
+  // Gated on the view being on screen, because a Kanban user is not looking at any of it.
   const onWorktreesTab = activeTab === "worktrees";
   const { data: hosting } = useCodeHostingStatus(projectId ?? 0);
-  const { data: pullRequests = [] } = useProjectPullRequests(projectId ?? null, onWorktreesTab);
-  const byBranch = useMemo(() => pullRequestsByBranch(pullRequests), [pullRequests]);
-  const ciByNumber = usePullRequestCi(projectId ?? null, pullRequests, onWorktreesTab);
+
+  // One page of thirty, which is more than the panel shows at once. The cursor stack is what makes
+  // "previous" work without re-deriving a page number: each forge's cursor means something
+  // different — a GraphQL cursor on GitHub, a row offset elsewhere — so the only way back is the
+  // one we came by.
+  const [pullRequestSearch, setPullRequestSearch] = useState("");
+  const [cursors, setCursors] = useState<Array<string | null>>([null]);
+  // A cursor only means anything to the project it came from — it is a GraphQL cursor or a row
+  // offset into *that* forge's list — and this view never unmounts when the user switches projects,
+  // so without a reset the new project would be asked for the old one's page four.
+  //
+  // Adjusted during render rather than in an effect: React re-renders this component before showing
+  // anything, so the page below is asked for with the reset cursor rather than being requested once
+  // with the stale one and again after the effect fires.
+  const [cursorProject, setCursorProject] = useState(projectId);
+  if (cursorProject !== projectId) {
+    setCursorProject(projectId);
+    setCursors([null]);
+    setPullRequestSearch("");
+  }
+  const cursor = cursors[cursors.length - 1];
+  const { data: pullRequestPage } = useProjectPullRequestPage(
+    projectId ?? null,
+    cursor,
+    pullRequestSearch,
+    onWorktreesTab,
+  );
+  const pullRequests = pullRequestPage?.items ?? [];
   // Shown whenever the forge can answer, including when the answer is none — an empty panel says
   // there is nothing to pick up, which is information. A project with no forge gets no column at
   // all, because for it there is no such thing as a pull request.
   const showPullRequests =
-    projectId != null && hosting?.rung === "Ready" && hosting.forge_supports_branch_lookup === true;
+    projectId != null &&
+    hosting?.rung === "Ready" &&
+    hosting.forge_supports_pull_request_list === true;
 
   const [selectedWorktreePath, setSelectedWorktreePath] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -107,12 +143,57 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
   const [spawnSeed, setSpawnSeed] = useState<SpawnSeed | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  useShortcuts("worktrees", {
-    "wt-new": () => setShowCreateDialog(true),
-    "wt-refresh": () => {
+  /**
+   * The page, and every row detail held against it.
+   *
+   * The details are what actually need saying so: they are cached against
+   * `(number, head_sha, updated_at)` with no expiry, because on the forges that answer them
+   * separately nothing else can change them. That is right for a poll and wrong for a person asking
+   * to be brought up to date — this is the escape hatch, and the only thing that re-reads a row
+   * whose forge never bumped a timestamp.
+   */
+  const queryClient = useQueryClient();
+  const refreshPullRequests = useCallback(() => {
+    if (projectId == null) return;
+    void queryClient.invalidateQueries({
+      queryKey: integrationQueryKeys.projectPullRequests(projectId),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: integrationQueryKeys.pullRequestRowDetails(projectId),
+    });
+  }, [queryClient, projectId]);
+
+  /**
+   * Bring the whole view up to date.
+   *
+   * The fetch comes first and is awaited, because the ahead/behind counts on every card are
+   * measured against remote-tracking refs: reading the list before moving them reports the same
+   * stale numbers the user pressed refresh to clear.
+   *
+   * A failed fetch is not a failed refresh — the local half of the view is still worth updating,
+   * so the rest runs either way. Only a refresh the user asked for says why the fetch failed; one
+   * triggered by arriving on the tab has no business raising a toast about the network.
+   */
+  const refresh = useCallback(
+    async (force: boolean) => {
+      if (projectId != null) {
+        try {
+          await fetchProjectRemote({ projectId, force });
+        } catch (error) {
+          if (force) toast.error(`Failed to fetch from the remote: ${String(error)}`);
+          else console.debug("background fetch skipped:", error);
+        }
+      }
       void refetchWorktrees();
       void refetchPrunableBranches();
+      refreshPullRequests();
     },
+    [projectId, fetchProjectRemote, refetchWorktrees, refetchPrunableBranches, refreshPullRequests],
+  );
+
+  useShortcuts("worktrees", {
+    "wt-new": () => setShowCreateDialog(true),
+    "wt-refresh": () => void refresh(true),
     "focus-search": () => {
       searchInputRef.current?.focus();
       searchInputRef.current?.select();
@@ -122,11 +203,8 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
   // Refresh when tab becomes active — always-mounted views don't remount on navigate so
   // refetchOnMount never fires again; this replicates the prior behaviour.
   useEffect(() => {
-    if (activeTab === "worktrees") {
-      void refetchWorktrees();
-      void refetchPrunableBranches();
-    }
-  }, [activeTab, refetchWorktrees, refetchPrunableBranches]);
+    if (activeTab === "worktrees") void refresh(false);
+  }, [activeTab, refresh]);
 
   // Deep-link: pendingWorktreeId overrides selection once the worktree list resolves.
   // The local selection is adjusted during render so the view opens on the right worktree
@@ -159,15 +237,17 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
       );
   }, [worktrees, statusFilter, search]);
 
-  const groupedWorktrees = useMemo(() => {
-    const groupMap = new Map<string, WorktreeWithStatus[]>();
-    for (const wt of filteredWorktrees) {
-      const key = wt.base_branch ?? wt.branch_name;
-      if (!groupMap.has(key)) groupMap.set(key, []);
-      groupMap.get(key)!.push(wt);
-    }
-    return Array.from(groupMap.entries()).map(([groupKey, items]) => ({ groupKey, items }));
-  }, [filteredWorktrees]);
+  // The repository checkout is shown on its own row rather than grouped: it has no base branch, so
+  // it would otherwise file itself in with the worktrees cut *from* its branch.
+  const repositoryWorktree = useMemo(
+    () => filteredWorktrees.find((wt) => isRepositoryRoot(wt.path, repoPath ?? "")) ?? null,
+    [filteredWorktrees, repoPath],
+  );
+
+  const groupedWorktrees = useMemo(
+    () => groupWorktrees(filteredWorktrees, repoPath ?? ""),
+    [filteredWorktrees, repoPath],
+  );
 
   // Resolved against every worktree rather than the filtered list, so a card's session count does
   // not change with the search box — and so a session in `.maestro/worktrees/…` is credited to its
@@ -185,6 +265,10 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
     const anyExpanded = groupKeys.some((k) => !collapsedGroups[k]);
     setCollapsedGroups(Object.fromEntries(groupKeys.map((k) => [k, anyExpanded])));
   };
+
+  // The network fetch is the slow half, so the button has to spin for it too — otherwise it looks
+  // finished while the counts it exists to correct are still being fetched.
+  const isRefreshing = isFetching || isFetchingRemote;
 
   const selectedWorktree = worktrees.find((w) => w.path === selectedWorktreePath) ?? null;
 
@@ -212,8 +296,14 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
           workspaceMode: "NewWorktree",
           branchMode: "Checkout",
           baseBranch: entry.action.baseBranch,
+          pullRequestNumber: entry.action.pullRequestNumber,
+          headBranch: entry.pullRequest.head_branch,
           sessionName: entry.pullRequest.title,
         });
+        return;
+      // The row's button is inert, so this is only reachable if the answer changed under it.
+      case "unsupported":
+        return;
     }
   }
 
@@ -302,12 +392,12 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
                     variant="ghost"
                     size="icon-sm"
                     className="h-8 w-8"
-                    disabled={isFetching}
-                    onClick={() => void refetchWorktrees()}
+                    disabled={isRefreshing}
+                    onClick={() => void refresh(true)}
                   />
                 }
               >
-                <RefreshCw className={cn("w-3.5 h-3.5", isFetching && "animate-spin")} />
+                <RefreshCw className={cn("w-3.5 h-3.5", isRefreshing && "animate-spin")} />
               </TooltipTrigger>
               <TooltipContent>Refresh worktrees</TooltipContent>
             </Tooltip>
@@ -363,6 +453,7 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
                 <WorktreeCardGrid
                   sessionsByPath={sessionsByPath}
                   now={now}
+                  repository={repositoryWorktree}
                   groups={groupedWorktrees}
                   collapsedGroups={collapsedGroups}
                   onToggleGroup={toggleGroup}
@@ -373,8 +464,7 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
                   }}
                   repoPath={repoPath ?? ""}
                   projectId={projectId ?? null}
-                  pullRequestsByBranch={byBranch}
-                  ciByNumber={ciByNumber}
+                  pullRequests={showPullRequests && onWorktreesTab}
                   emptyMessage={
                     worktrees.length === 0 ? "No worktrees yet" : "No worktrees match your filter"
                   }
@@ -403,12 +493,30 @@ export const WorktreesView: React.FC<WorktreesViewProps> = ({
                 <PullRequestPanel
                   projectId={projectId}
                   pullRequests={pullRequests}
+                  total={pullRequestPage?.total ?? null}
                   worktrees={worktrees}
                   sessionsByPath={sessionsByPath}
-                  ciByNumber={ciByNumber}
                   remote={hosting?.remote ?? "origin"}
                   now={now}
                   poll={onWorktreesTab}
+                  canSearch={hosting?.forge_searches_pull_requests === true}
+                  canCheckOutForks={hosting?.forge_checks_out_fork_pull_requests === true}
+                  search={pullRequestSearch}
+                  onSearchChange={(next) => {
+                    // A new search is a new list, so the way back through the old one is gone.
+                    setPullRequestSearch(next);
+                    setCursors([null]);
+                  }}
+                  hasPrevious={cursors.length > 1}
+                  hasNext={pullRequestPage?.next_cursor != null}
+                  onPrevious={() => setCursors((stack) => stack.slice(0, -1))}
+                  onNext={() =>
+                    setCursors((stack) =>
+                      pullRequestPage?.next_cursor != null
+                        ? [...stack, pullRequestPage.next_cursor]
+                        : stack,
+                    )
+                  }
                   onAct={handlePullRequestAction}
                 />
               </ResizablePanel>

@@ -1,16 +1,14 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { MarkdownBlock } from "@/components/execution/activity/MarkdownBlock";
 import { ChevronLeft, ChevronRight, MoreHorizontal, Save, Trash2 } from "lucide-react";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { ReviewChangesPanel } from "@/components/execution/activity/ReviewChangesPanel";
 import { CanvasRenderer } from "@/components/execution/activity/canvas/CanvasRenderer";
 import { extractBodyText } from "@/components/execution/activity/PermissionPrompt";
 import {
-  extractOptions,
   extractPlanToolCallId,
   extractBodyTextFromToolCallItem,
 } from "@/components/execution/activity/permission-prompt-utils";
-import { PlanPermissionOverlay } from "@/components/execution/activity/PlanPermissionOverlay";
 import { TerminalComponent } from "@/components/execution/terminal/Terminal";
 import { AcpTerminalView } from "@/components/execution/terminal/AcpTerminalView";
 import { OverviewPanel } from "./OverviewPanel";
@@ -49,8 +47,9 @@ interface SidePanelContentProps {
   sessionKey: number;
   subagentItems: ToolCallItem[];
   toolCallMap: Map<string, ToolCallItem>;
+  /** Set while a plan is awaiting an answer — the tab reads and annotates it, the stream card
+   *  answers it. Only the send button's wording depends on this. */
   sidePanelPlan: { requestId: string; payload: Record<string, unknown> } | null;
-  onPlanRespond: (requestId: string, optionId: string | null) => void;
   canvasMap: Map<string, CanvasSurface>;
   latestCanvasSurfaceId: string | null;
   workingFiles: WorkingFileEntry[];
@@ -72,6 +71,8 @@ interface SidePanelContentProps {
   canSendImages?: boolean;
   /** Puts text in the composer without sending it. Absent when there is no live agent to ask. */
   onSeedPrompt?: (text: string) => void;
+  /** Reports a Files tab holding an unsaved draft, so closing it can be guarded. */
+  onTabDirtyChange?: (tabId: string, dirty: boolean) => void;
 }
 
 export function SidePanelContent({
@@ -82,7 +83,6 @@ export function SidePanelContent({
   subagentItems,
   toolCallMap,
   sidePanelPlan,
-  onPlanRespond,
   canvasMap,
   latestCanvasSurfaceId,
   workingFiles,
@@ -100,6 +100,7 @@ export function SidePanelContent({
   isProcessing,
   canSendImages,
   onSeedPrompt,
+  onTabDirtyChange,
 }: SidePanelContentProps) {
   const [artifactsSelectedFile, setArtifactsSelectedFile] = useState<string | null>(null);
   const selectedProject = useSelectedProject();
@@ -108,7 +109,8 @@ export function SidePanelContent({
   // Polling is gated on the session being on screen rather than on the Review or Overview
   // tab being the active one: the Review tab has to be able to raise its unseen dot while
   // the user is looking at another tab, or at a collapsed panel.
-  const { diffStats, changedFilesCount } = useSessionDiffStats(sessionKey, isSessionActive);
+  const { diffStats, changedFilesCount, uncommittedFilesCount, scope, isError } =
+    useSessionDiffStats(sessionKey, isSessionActive);
   // The pull request state is gated harder than the diff stats above, because it is the one thing
   // here that leaves the machine. Its only consumer is a card on the Overview tab and there is no
   // unseen dot for it to raise, so nothing is lost by asking the forge only while that tab is the
@@ -188,6 +190,20 @@ export function SidePanelContent({
     };
   }, [toolCallMap]);
 
+  // A pending request carries its own copy of the plan, which is the freshest one. The tool call
+  // the stream already holds is the fallback, and the only source once the request is answered.
+  const planBody = useMemo(() => {
+    if (sidePanelPlan) {
+      const fromPayload = extractBodyText(sidePanelPlan.payload);
+      if (fromPayload !== null) return fromPayload;
+      const id = extractPlanToolCallId(sidePanelPlan.payload);
+      const item = id ? toolCallMap.get(id) : undefined;
+      const fromItem = item ? extractBodyTextFromToolCallItem(item) : null;
+      if (fromItem !== null) return fromItem;
+    }
+    return planContent;
+  }, [sidePanelPlan, toolCallMap, planContent]);
+
   return (
     <>
       {tabs.map(({ id, kind, initialPath, acpTerminalId, isAuthTerminal }) => {
@@ -210,6 +226,9 @@ export function SidePanelContent({
                   if (kind === "artifacts" && filePath) setArtifactsSelectedFile(filePath);
                 }}
                 diffStats={diffStats}
+                uncommittedFilesCount={uncommittedFilesCount}
+                scope={scope}
+                statsUnavailable={isError}
                 connection={connection}
                 wslDistroName={wslDistroName}
                 ship={ship}
@@ -218,35 +237,21 @@ export function SidePanelContent({
             )}
             {kind === "plan" && (
               <div className="absolute inset-0 flex flex-col overflow-hidden">
-                {sidePanelPlan ? (
-                  <PlanPermissionOverlay
-                    requestId={sidePanelPlan.requestId}
-                    bodyText={(() => {
-                      const fromPayload = extractBodyText(sidePanelPlan.payload);
-                      if (fromPayload !== null) return fromPayload;
-                      const id = extractPlanToolCallId(sidePanelPlan.payload);
-                      const item = id ? toolCallMap.get(id) : undefined;
-                      return item ? extractBodyTextFromToolCallItem(item) : null;
-                    })()}
-                    options={extractOptions(sidePanelPlan.payload)}
-                    onRespond={onPlanRespond}
-                    annotations={{
-                      sessionKey,
-                      onSend: onSendAnnotations,
-                      sendDisabled: isProcessing,
-                    }}
-                  />
-                ) : planContent ? (
+                {/* Read and annotate only. The request itself is answered from the card in the
+                    stream, so a pending plan and a settled one render the same way — all that
+                    changes is where the body comes from and what the send button is called. */}
+                {planBody ? (
                   <PlanAnnotationLayer
                     className="flex-1"
                     sessionKey={sessionKey}
                     onSend={onSendAnnotations}
                     sendDisabled={isProcessing}
+                    sendLabel={sidePanelPlan ? "Revise plan" : undefined}
                   >
-                    <MarkdownBlock text={planContent} />
+                    <MarkdownBlock text={planBody} />
                   </PlanAnnotationLayer>
                 ) : planEntries && planEntries.length > 0 ? (
-                  <div className="flex-1 overflow-y-auto custom-scrollbar px-4 py-4">
+                  <div className="flex-1 overflow-y-auto px-4 py-4">
                     {planTitle && (
                       <div className="text-xs font-medium text-muted-foreground mb-3">
                         {planTitle}
@@ -363,17 +368,24 @@ export function SidePanelContent({
                         {/* Save and delete gave up their places in the row to the mode toggle and
                             the annotation bar: they are occasional, and the row is 400px wide. */}
                         <DropdownMenu>
-                          <DropdownMenuTrigger
-                            render={
-                              <button
-                                type="button"
-                                title="Canvas actions"
-                                className="p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
-                              />
-                            }
-                          >
-                            <MoreHorizontal className="w-3.5 h-3.5" />
-                          </DropdownMenuTrigger>
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <DropdownMenuTrigger
+                                  render={
+                                    <button
+                                      type="button"
+                                      aria-label="Canvas actions"
+                                      className="p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
+                                    />
+                                  }
+                                />
+                              }
+                            >
+                              <MoreHorizontal className="w-3.5 h-3.5" />
+                            </TooltipTrigger>
+                            <TooltipContent>Canvas actions</TooltipContent>
+                          </Tooltip>
                           {/* `DropdownMenuContent` is `w-(--anchor-width)` by default, which here
                               is the width of an icon button — every label would wrap to three
                               lines. These items are labels, not a menu sized to a field. */}
@@ -457,6 +469,8 @@ export function SidePanelContent({
                 wslDistroName={wslDistroName}
                 isActive={isActive}
                 initialPath={initialPath}
+                isProcessing={isProcessing}
+                onDirtyChange={(dirty) => onTabDirtyChange?.(id, dirty)}
               />
             )}
             {kind === "terminal" && (

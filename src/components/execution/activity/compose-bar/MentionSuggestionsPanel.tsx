@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { iconForFilePath } from "./composeUtils";
 import { SuggestionsPortalWrapper } from "./SuggestionsPortalWrapper";
 
@@ -21,7 +21,7 @@ export function MentionSuggestionsPanel({
   if (!panelPos || suggestions.length === 0) return null;
   return (
     <SuggestionsPortalWrapper panelPos={panelPos}>
-      <div className="overflow-y-auto max-h-48 p-1 custom-scrollbar">
+      <div className="overflow-y-auto max-h-48 p-1">
         {suggestions.map((path, i) => (
           <button
             key={path}
